@@ -13,6 +13,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "duckdb": "^1.4.3",
     "express": "^5.2.1"
   }
 }
