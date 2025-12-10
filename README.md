@@ -1,6 +1,6 @@
 # ZeroSum Server
 
-Express.js server for querying financial data from a DuckDB database.
+Express.js server for querying financial data from a DuckDB database with optional Alpaca Markets integration for trading symbols.
 
 ## Installation
 
@@ -9,6 +9,21 @@ npm install
 ```
 
 Note: The `duckdb` package may take several minutes to install as it compiles native bindings.
+
+## Configuration
+
+Create a `.env` file in the root directory with your Alpaca API credentials (optional):
+
+```bash
+ALPACA_API_KEY=your_api_key_here
+ALPACA_API_SECRET=your_api_secret_here
+ALPACA_BASE_URL=https://paper-api.alpaca.markets
+PORT=3000
+```
+
+See `.env.example` for a template.
+
+**Note:** Alpaca integration is optional. The server will work without it, but won't include ticker symbols in responses.
 
 ## Running the Server
 
@@ -27,41 +42,68 @@ Welcome message
 Health check endpoint
 - Returns: `{ status: 'OK', timestamp: '...' }`
 
-### GET /api/financials?company=<name>
+### GET /api/financials?company=<name>&enrichAlpaca=true
 Search for financial data by company name (partial match supported)
 
 **Parameters:**
 - `company` (required): Partial or full company name to search for
+- `enrichAlpaca` (optional): Set to `true` to include Alpaca trading symbols
 
 **Example:**
 ```bash
+# Without Alpaca enrichment
 curl "http://localhost:3000/api/financials?company=Apple"
+
+# With Alpaca enrichment (requires API credentials)
+curl "http://localhost:3000/api/financials?company=Apple&enrichAlpaca=true"
 ```
 
-**Response:**
+**Response (without Alpaca):**
 ```json
 {
   "query": "Apple",
-  "count": 42,
+  "count": 1,
+  "alpacaEnriched": false,
   "results": [
     {
-      "name": "Apple Inc.",
-      "date": "2024-03-31",
-      "filing_date": "2024-05-02",
-      "cik": "0000320193",
-      "Revenue": 123456789,
-      "Assets": 987654321,
-      "CurrentAssets": 456789123,
-      "CurrentLiabilities": 234567890,
-      "StockholdersEquity": 654321098,
-      "TotalLiabilities": 333333231,
-      "LongTermDebt": 98765341,
-      "NetCurrentAssets": 222221233,
-      "NetIncome": 34567890,
-      "EarningsPerShare": 2.34,
-      "SharesOutstanding": 14765432109,
-      "BookValuePerShare": 44.32,
-      "GrahamNumber": 78.56
+      "name": "APPLE INC",
+      "date": 20250331,
+      "filing_date": "2025-05-02T06:01:00.000Z",
+      "cik": 320193,
+      "Revenue": 95359000000,
+      "Assets": 331233000000,
+      "EarningsPerShare": 1.65,
+      "GrahamNumber": 12.83,
+      ...
+    }
+  ]
+}
+```
+
+**Response (with Alpaca enrichment):**
+```json
+{
+  "query": "Apple",
+  "count": 1,
+  "alpacaEnriched": true,
+  "results": [
+    {
+      "name": "APPLE INC",
+      "date": 20250331,
+      "cik": 320193,
+      "Revenue": 95359000000,
+      "EarningsPerShare": 1.65,
+      ...,
+      "alpaca": {
+        "symbol": "AAPL",
+        "exchange": "NASDAQ",
+        "asset_id": "b0b6dd9d-8b9b-48a9-ba46-b9d54906e415",
+        "tradable": true,
+        "marginable": true,
+        "shortable": true,
+        "easy_to_borrow": true,
+        "fractionable": true
+      }
     }
   ]
 }
@@ -113,6 +155,8 @@ The server uses a DuckDB database (`financials.duckdb`) containing financial sta
 ## Files
 
 - `index.js` - Main Express server
+- `alpaca.js` - Alpaca Markets API integration
 - `financials.sql` - SQL query template for financial data
 - `financials.duckdb` - DuckDB database file
-- `EX 5.sql` - Original SQL query reference
+- `.env` - Environment variables (create from `.env.example`)
+- `.env.example` - Environment variables template

@@ -1,10 +1,34 @@
+require('dotenv').config();
 const express = require('express');
 const duckdb = require('duckdb');
 const fs = require('fs');
 const path = require('path');
+const AlpacaClient = require('./alpaca');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Initialize Alpaca client if credentials are provided
+let alpacaClient = null;
+if (process.env.ALPACA_CLIENT_ID && process.env.ALPACA_PRIVATE_KEY_FILE) {
+  try {
+    const privateKey = fs.readFileSync(
+      path.join(__dirname, process.env.ALPACA_PRIVATE_KEY_FILE),
+      'utf8'
+    );
+    alpacaClient = new AlpacaClient(
+      process.env.ALPACA_CLIENT_ID,
+      privateKey,
+      process.env.ALPACA_BASE_URL
+    );
+    console.log('Alpaca Broker API integration enabled');
+  } catch (error) {
+    console.error('Error loading Alpaca private key:', error.message);
+    console.log('Running without ticker enrichment');
+  }
+} else {
+  console.log('Alpaca credentials not found - running without ticker enrichment');
+}
 
 // Initialize DuckDB
 const db = new duckdb.Database(path.join(__dirname, 'financials.duckdb'));
@@ -27,29 +51,44 @@ app.get('/health', (req, res) => {
 });
 
 // Financial data endpoint - search companies by name
-app.get('/api/financials', (req, res) => {
-  const { company } = req.query;
+app.get('/api/financials', async (req, res) => {
+  const { company, enrichAlpaca } = req.query;
 
   if (!company) {
     return res.status(400).json({
       error: 'Missing required parameter: company',
-      usage: '/api/financials?company=<company_name>'
+      usage: '/api/financials?company=<company_name>&enrichAlpaca=true'
     });
   }
 
   // Use ILIKE for case-insensitive partial matching
   const searchPattern = `%${company}%`;
 
-  connection.all(financialsQuery, [searchPattern], (err, rows) => {
+  connection.all(financialsQuery, [searchPattern], async (err, rows) => {
     if (err) {
       console.error('Database error:', err);
       return res.status(500).json({ error: 'Database query failed', details: err.message });
     }
 
+    let results = rows;
+
+    // Enrich with Alpaca data if requested and client is available
+    if (enrichAlpaca === 'true' && alpacaClient) {
+      try {
+        results = await Promise.all(
+          rows.map(row => alpacaClient.enrichFinancialData(row))
+        );
+      } catch (error) {
+        console.error('Error enriching with Alpaca data:', error);
+        // Continue with unenriched data
+      }
+    }
+
     res.json({
       query: company,
-      count: rows.length,
-      results: rows
+      count: results.length,
+      alpacaEnriched: enrichAlpaca === 'true' && alpacaClient !== null,
+      results: results
     });
   });
 });
