@@ -15,11 +15,13 @@ Note: The `duckdb` package may take several minutes to install as it compiles na
 Create a `.env` file in the root directory with your Alpaca API credentials (optional):
 
 ```bash
-ALPACA_API_KEY=your_api_key_here
-ALPACA_API_SECRET=your_api_secret_here
-ALPACA_BASE_URL=https://paper-api.alpaca.markets
+ALPACA_CLIENT_ID=your_client_id_here
+ALPACA_PRIVATE_KEY=your_base64_private_key_here
+ALPACA_BASE_URL=https://broker-api.sandbox.alpaca.markets
 PORT=3000
 ```
+
+**Important:** For `ALPACA_PRIVATE_KEY`, copy only the base64 content between the `-----BEGIN PRIVATE KEY-----` and `-----END PRIVATE KEY-----` delimiters (without the delimiters themselves).
 
 See `.env.example` for a template.
 

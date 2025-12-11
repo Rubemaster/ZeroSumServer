@@ -10,12 +10,12 @@ const PORT = process.env.PORT || 3000;
 
 // Initialize Alpaca client if credentials are provided
 let alpacaClient = null;
-if (process.env.ALPACA_CLIENT_ID && process.env.ALPACA_PRIVATE_KEY_FILE) {
+if (process.env.ALPACA_CLIENT_ID && process.env.ALPACA_PRIVATE_KEY) {
   try {
-    const privateKey = fs.readFileSync(
-      path.join(__dirname, process.env.ALPACA_PRIVATE_KEY_FILE),
-      'utf8'
-    );
+    // Reconstruct PEM format from base64 key
+    const privateKeyBase64 = process.env.ALPACA_PRIVATE_KEY;
+    const privateKey = `-----BEGIN PRIVATE KEY-----\n${privateKeyBase64}\n-----END PRIVATE KEY-----`;
+
     alpacaClient = new AlpacaClient(
       process.env.ALPACA_CLIENT_ID,
       privateKey,
@@ -23,7 +23,7 @@ if (process.env.ALPACA_CLIENT_ID && process.env.ALPACA_PRIVATE_KEY_FILE) {
     );
     console.log('Alpaca Broker API integration enabled');
   } catch (error) {
-    console.error('Error loading Alpaca private key:', error.message);
+    console.error('Error initializing Alpaca client:', error.message);
     console.log('Running without ticker enrichment');
   }
 } else {
