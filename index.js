@@ -196,6 +196,83 @@ app.get('/api/companies', (req, res) => {
   });
 });
 
+// ============ Market Data Endpoints ============
+
+// Get price history for a stock
+app.get('/api/market/bars/:symbol', async (req, res) => {
+  if (!alpacaClient) {
+    return res.status(503).json({
+      error: 'Market data not available',
+      details: 'Alpaca client not configured'
+    });
+  }
+
+  const { symbol } = req.params;
+  const { timeframe, start, end, limit, adjustment, feed } = req.query;
+
+  try {
+    const data = await alpacaClient.getPriceHistory(symbol.toUpperCase(), {
+      timeframe,
+      start,
+      end,
+      limit: limit ? parseInt(limit) : undefined,
+      adjustment,
+      feed
+    });
+
+    res.json(data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch price history',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// Get latest quote for a stock
+app.get('/api/market/quote/:symbol', async (req, res) => {
+  if (!alpacaClient) {
+    return res.status(503).json({
+      error: 'Market data not available',
+      details: 'Alpaca client not configured'
+    });
+  }
+
+  const { symbol } = req.params;
+
+  try {
+    const data = await alpacaClient.getLatestQuote(symbol.toUpperCase());
+    res.json(data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch quote',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// Get latest trade for a stock
+app.get('/api/market/trade/:symbol', async (req, res) => {
+  if (!alpacaClient) {
+    return res.status(503).json({
+      error: 'Market data not available',
+      details: 'Alpaca client not configured'
+    });
+  }
+
+  const { symbol } = req.params;
+
+  try {
+    const data = await alpacaClient.getLatestTrade(symbol.toUpperCase());
+    res.json(data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch trade',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
 // Start the server
 async function startServer() {
   try {

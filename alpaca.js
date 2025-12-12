@@ -6,6 +6,7 @@ class AlpacaClient {
     this.clientId = clientId;
     this.privateKey = privateKey;
     this.baseURL = baseURL || 'https://broker-api.sandbox.alpaca.markets';
+    this.dataURL = 'https://data.alpaca.markets'; // Market data API endpoint
     this.cache = new Map(); // Cache ticker lookups
     this.accessToken = null;
     this.tokenExpiry = null;
@@ -178,6 +179,112 @@ class AlpacaClient {
       ...financialRecord,
       alpaca: null
     };
+  }
+
+  /**
+   * Get historical price bars for a stock
+   * @param {string} symbol - Stock ticker symbol (e.g., 'AAPL')
+   * @param {Object} options - Query options
+   * @param {string} options.timeframe - Bar timeframe: 1Min, 5Min, 15Min, 30Min, 1Hour, 4Hour, 1Day, 1Week, 1Month
+   * @param {string} options.start - Start date (RFC-3339 or YYYY-MM-DD)
+   * @param {string} options.end - End date (RFC-3339 or YYYY-MM-DD)
+   * @param {number} options.limit - Max number of bars to return (default 1000, max 10000)
+   * @param {string} options.adjustment - Price adjustment: raw, split, dividend, all (default: raw)
+   * @param {string} options.feed - Data feed: iex, sip (default: iex for free tier)
+   */
+  async getPriceHistory(symbol, options = {}) {
+    const {
+      timeframe = '1Day',
+      start,
+      end,
+      limit = 1000,
+      adjustment = 'raw',
+      feed = 'iex'
+    } = options;
+
+    try {
+      const token = await this.getAccessToken();
+
+      const params = {
+        timeframe,
+        limit,
+        adjustment,
+        feed
+      };
+
+      if (start) params.start = start;
+      if (end) params.end = end;
+
+      const response = await axios.get(
+        `${this.dataURL}/v2/stocks/${symbol}/bars`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          },
+          params
+        }
+      );
+
+      return {
+        symbol,
+        timeframe,
+        bars: response.data.bars || [],
+        next_page_token: response.data.next_page_token
+      };
+    } catch (error) {
+      console.error(`Error fetching price history for ${symbol}:`, error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get the latest quote for a stock
+   * @param {string} symbol - Stock ticker symbol
+   */
+  async getLatestQuote(symbol) {
+    try {
+      const token = await this.getAccessToken();
+
+      const response = await axios.get(
+        `${this.dataURL}/v2/stocks/${symbol}/quotes/latest`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          },
+          params: { feed: 'iex' }
+        }
+      );
+
+      return response.data;
+    } catch (error) {
+      console.error(`Error fetching latest quote for ${symbol}:`, error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get the latest trade for a stock
+   * @param {string} symbol - Stock ticker symbol
+   */
+  async getLatestTrade(symbol) {
+    try {
+      const token = await this.getAccessToken();
+
+      const response = await axios.get(
+        `${this.dataURL}/v2/stocks/${symbol}/trades/latest`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          },
+          params: { feed: 'iex' }
+        }
+      );
+
+      return response.data;
+    } catch (error) {
+      console.error(`Error fetching latest trade for ${symbol}:`, error.response?.data || error.message);
+      throw error;
+    }
   }
 }
 
