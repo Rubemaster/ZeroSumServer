@@ -96,24 +96,20 @@ async function initializeDatabase() {
 // Initialize Alpaca client if any credentials are provided
 let alpacaClient = null;
 const hasMarketDataCreds = process.env.ALPACA_API_KEY && process.env.ALPACA_API_SECRET;
-const hasBrokerCreds = process.env.ALPACA_CLIENT_ID && process.env.ALPACA_PRIVATE_KEY;
+const hasBrokerCreds = process.env.ALPACA_CLIENT_ID && process.env.ALPACA_CLIENT_SECRET;
 
 if (hasMarketDataCreds || hasBrokerCreds) {
   try {
     const config = {
-      // Trading/Data API credentials (for market data)
+      // Trading/Data API credentials (for market data - uses API key auth)
       apiKey: process.env.ALPACA_API_KEY,
       apiSecret: process.env.ALPACA_API_SECRET,
-      // Broker API OAuth credentials
+      // Broker API OAuth credentials (client_credentials flow)
       clientId: process.env.ALPACA_CLIENT_ID,
-      baseURL: process.env.ALPACA_BASE_URL
+      clientSecret: process.env.ALPACA_CLIENT_SECRET,
+      authURL: process.env.ALPACA_AUTH_URL || 'https://authx.sandbox.alpaca.markets',
+      brokerURL: process.env.ALPACA_BROKER_URL || 'https://broker-api.sandbox.alpaca.markets'
     };
-
-    // Reconstruct PEM format from base64 key if provided
-    if (process.env.ALPACA_PRIVATE_KEY) {
-      const privateKeyBase64 = process.env.ALPACA_PRIVATE_KEY;
-      config.privateKey = `-----BEGIN PRIVATE KEY-----\n${privateKeyBase64}\n-----END PRIVATE KEY-----`;
-    }
 
     alpacaClient = new AlpacaClient(config);
 
@@ -121,7 +117,7 @@ if (hasMarketDataCreds || hasBrokerCreds) {
       console.log('Alpaca Market Data API enabled');
     }
     if (hasBrokerCreds) {
-      console.log('Alpaca Broker API integration enabled');
+      console.log('Alpaca Broker API integration enabled (client_credentials)');
     }
   } catch (error) {
     console.error('Error initializing Alpaca client:', error.message);
@@ -285,6 +281,103 @@ app.get('/api/market/trade/:symbol', async (req, res) => {
     res.status(error.response?.status || 500).json({
       error: 'Failed to fetch trade',
       details: error.response?.data || error.message
+    });
+  }
+});
+
+// ============ Alpaca OAuth Test Endpoint ============
+const crypto = require('crypto');
+
+// Test Alpaca ES256 JWT OAuth flow
+app.post('/api/test/alpaca-oauth', async (req, res) => {
+  const { clientId, privateKey } = req.body;
+
+  if (!clientId || !privateKey) {
+    return res.status(400).json({
+      error: 'Missing required fields',
+      usage: 'POST with JSON body: { "clientId": "...", "privateKey": "-----BEGIN EC PRIVATE KEY-----\\n...\\n-----END EC PRIVATE KEY-----" }'
+    });
+  }
+
+  const TOKEN_URL = 'https://authx.sandbox.alpaca.markets/v1/oauth2/token';
+
+  function base64urlEncode(data) {
+    let base64;
+    if (Buffer.isBuffer(data)) {
+      base64 = data.toString('base64');
+    } else {
+      base64 = Buffer.from(JSON.stringify(data)).toString('base64');
+    }
+    return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  }
+
+  function derToRaw(derSignature) {
+    let offset = 2;
+    if (derSignature[offset] !== 0x02) throw new Error('Invalid DER signature');
+    offset++;
+    const rLength = derSignature[offset];
+    offset++;
+    let r = derSignature.slice(offset, offset + rLength);
+    offset += rLength;
+    if (derSignature[offset] !== 0x02) throw new Error('Invalid DER signature');
+    offset++;
+    const sLength = derSignature[offset];
+    offset++;
+    let s = derSignature.slice(offset, offset + sLength);
+    if (r.length > 32) r = r.slice(r.length - 32);
+    if (s.length > 32) s = s.slice(s.length - 32);
+    const rawSig = Buffer.alloc(64);
+    r.copy(rawSig, 32 - r.length);
+    s.copy(rawSig, 64 - s.length);
+    return rawSig;
+  }
+
+  try {
+    // Generate JWT
+    const header = { alg: 'ES256', typ: 'JWT', kid: clientId };
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+      iss: clientId,
+      sub: clientId,
+      aud: TOKEN_URL,
+      iat: now,
+      exp: now + 300,
+      jti: crypto.randomUUID()
+    };
+
+    const headerEncoded = base64urlEncode(header);
+    const payloadEncoded = base64urlEncode(payload);
+    const signingInput = `${headerEncoded}.${payloadEncoded}`;
+
+    const sign = crypto.createSign('SHA256');
+    sign.update(signingInput);
+    const derSignature = sign.sign(privateKey);
+    const rawSignature = derToRaw(derSignature);
+    const signatureEncoded = base64urlEncode(rawSignature);
+    const jwt = `${signingInput}.${signatureEncoded}`;
+
+    // Exchange JWT for token
+    const params = new URLSearchParams();
+    params.append('grant_type', 'client_credentials');
+    params.append('client_id', clientId);
+    params.append('client_assertion_type', 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer');
+    params.append('client_assertion', jwt);
+
+    const response = await axios.post(TOKEN_URL, params.toString(), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+
+    res.json({
+      success: true,
+      jwt: jwt,
+      token_response: response.data
+    });
+  } catch (error) {
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.data || null,
+      hint: error.message.includes('unsupported') ? 'Private key format is invalid or incomplete' : null
     });
   }
 });

@@ -3,12 +3,13 @@ const jwt = require('jsonwebtoken');
 
 class AlpacaClient {
   constructor(config) {
-    // Broker API OAuth credentials
+    // Broker API OAuth credentials (client_credentials flow)
     this.clientId = config.clientId;
-    this.privateKey = config.privateKey;
-    this.baseURL = config.baseURL || 'https://broker-api.sandbox.alpaca.markets';
+    this.clientSecret = config.clientSecret;
+    this.authURL = config.authURL || 'https://authx.sandbox.alpaca.markets';
+    this.brokerURL = config.brokerURL || 'https://broker-api.sandbox.alpaca.markets';
 
-    // Trading/Data API credentials (for market data)
+    // Trading/Data API credentials (for market data - uses API key auth)
     this.apiKey = config.apiKey;
     this.apiSecret = config.apiSecret;
     this.dataURL = 'https://data.alpaca.markets'; // Market data API endpoint
@@ -39,27 +40,19 @@ class AlpacaClient {
       return this.accessToken;
     }
 
+    if (!this.clientId || !this.clientSecret) {
+      throw new Error('Broker API credentials not configured. Set ALPACA_CLIENT_ID and ALPACA_CLIENT_SECRET.');
+    }
+
     try {
-      // Create JWT for OAuth
-      const now = Math.floor(Date.now() / 1000);
-      const payload = {
-        iss: this.clientId,
-        aud: 'https://broker-api.alpaca.markets',
-        sub: this.clientId,
-        iat: now,
-        exp: now + 300, // 5 minutes
-        jti: `${this.clientId}-${now}`
-      };
-
-      const token = jwt.sign(payload, this.privateKey, { algorithm: 'RS256' });
-
-      // Exchange JWT for access token
+      // Use client_credentials flow with client_id and client_secret
       const params = new URLSearchParams();
-      params.append('grant_type', 'urn:ietf:params:oauth:grant-type:jwt-bearer');
-      params.append('assertion', token);
+      params.append('grant_type', 'client_credentials');
+      params.append('client_id', this.clientId);
+      params.append('client_secret', this.clientSecret);
 
       const response = await axios.post(
-        `${this.baseURL}/v1/oauth/token`,
+        `${this.authURL}/v1/oauth2/token`,
         params.toString(),
         {
           headers: {
@@ -69,9 +62,11 @@ class AlpacaClient {
       );
 
       this.accessToken = response.data.access_token;
-      // Set expiry to 50 minutes (tokens typically last 1 hour)
-      this.tokenExpiry = Date.now() + (50 * 60 * 1000);
+      // Set expiry based on expires_in (usually ~900 seconds), with 60 second buffer
+      const expiresIn = response.data.expires_in || 900;
+      this.tokenExpiry = Date.now() + ((expiresIn - 60) * 1000);
 
+      console.log('Alpaca access token obtained successfully');
       return this.accessToken;
     } catch (error) {
       console.error('Error getting access token:', error.response?.data || error.message);
