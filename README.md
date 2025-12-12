@@ -12,18 +12,34 @@ Note: The `duckdb` package may take several minutes to install as it compiles na
 
 ## Configuration
 
-Create a `.env` file in the root directory with your Alpaca API credentials (optional):
+Create a `.env` file in the root directory:
 
 ```bash
+# Database (required for cloud deployment)
+DATABASE_URL=https://your-cloud-storage-url/financials.duckdb
+
+# Alpaca credentials (optional)
 ALPACA_CLIENT_ID=your_client_id_here
 ALPACA_PRIVATE_KEY=your_base64_private_key_here
 ALPACA_BASE_URL=https://broker-api.sandbox.alpaca.markets
 PORT=3000
 ```
 
-**Important:** For `ALPACA_PRIVATE_KEY`, copy only the base64 content between the `-----BEGIN PRIVATE KEY-----` and `-----END PRIVATE KEY-----` delimiters (without the delimiters themselves).
-
 See `.env.example` for a template.
+
+### Database Setup
+
+**For local development:** The database file (`financials.duckdb`) should already be present in the repository directory. No additional configuration needed.
+
+**For cloud deployment (Render, Heroku, etc.):**
+1. Upload `financials.duckdb` to a cloud storage service (Dropbox, Google Drive, AWS S3, etc.)
+2. Get a direct download URL for the file
+3. Set the `DATABASE_URL` environment variable to this URL
+4. The server will automatically download the database on first startup
+
+### Alpaca Integration (Optional)
+
+**Important:** For `ALPACA_PRIVATE_KEY`, copy only the base64 content between the `-----BEGIN PRIVATE KEY-----` and `-----END PRIVATE KEY-----` delimiters (without the delimiters themselves).
 
 **Note:** Alpaca integration is optional. The server will work without it, but won't include ticker symbols in responses.
 

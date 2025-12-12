@@ -3,10 +3,95 @@ const express = require('express');
 const duckdb = require('duckdb');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
+const http = require('http');
 const AlpacaClient = require('./alpaca');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Database setup
+const DB_PATH = path.join(__dirname, 'financials.duckdb');
+const DB_URL = process.env.DATABASE_URL; // URL to download database from
+
+// Function to download database
+async function downloadDatabase(url, destination) {
+  return new Promise((resolve, reject) => {
+    console.log(`Downloading database from ${url}...`);
+    const protocol = url.startsWith('https') ? https : http;
+    const file = fs.createWriteStream(destination);
+
+    protocol.get(url, (response) => {
+      if (response.statusCode === 302 || response.statusCode === 301) {
+        // Follow redirect
+        file.close();
+        fs.unlinkSync(destination);
+        return downloadDatabase(response.headers.location, destination)
+          .then(resolve)
+          .catch(reject);
+      }
+
+      if (response.statusCode !== 200) {
+        file.close();
+        fs.unlinkSync(destination);
+        return reject(new Error(`Failed to download: ${response.statusCode}`));
+      }
+
+      const totalSize = parseInt(response.headers['content-length'], 10);
+      let downloadedSize = 0;
+      let lastLoggedPercent = 0;
+
+      response.on('data', (chunk) => {
+        downloadedSize += chunk.length;
+        const percent = Math.floor((downloadedSize / totalSize) * 100);
+        if (percent >= lastLoggedPercent + 10) {
+          console.log(`Download progress: ${percent}%`);
+          lastLoggedPercent = percent;
+        }
+      });
+
+      response.pipe(file);
+
+      file.on('finish', () => {
+        file.close();
+        console.log('Database download completed');
+        resolve();
+      });
+    }).on('error', (err) => {
+      file.close();
+      fs.unlinkSync(destination);
+      reject(err);
+    });
+  });
+}
+
+// Initialize database connection
+let db;
+let connection;
+let financialsQuery;
+
+async function initializeDatabase() {
+  // Check if database exists, if not and URL is provided, download it
+  if (!fs.existsSync(DB_PATH) && DB_URL) {
+    try {
+      await downloadDatabase(DB_URL, DB_PATH);
+    } catch (error) {
+      console.error('Failed to download database:', error.message);
+      throw error;
+    }
+  } else if (!fs.existsSync(DB_PATH)) {
+    throw new Error('Database file not found and DATABASE_URL not set');
+  }
+
+  // Initialize DuckDB
+  db = new duckdb.Database(DB_PATH);
+  connection = db.connect();
+
+  // Load SQL query
+  financialsQuery = fs.readFileSync(path.join(__dirname, 'financials.sql'), 'utf8');
+
+  console.log('Database initialized successfully');
+}
 
 // Initialize Alpaca client if credentials are provided
 let alpacaClient = null;
@@ -29,13 +114,6 @@ if (process.env.ALPACA_CLIENT_ID && process.env.ALPACA_PRIVATE_KEY) {
 } else {
   console.log('Alpaca credentials not found - running without ticker enrichment');
 }
-
-// Initialize DuckDB
-const db = new duckdb.Database(path.join(__dirname, 'financials.duckdb'));
-const connection = db.connect();
-
-// Load SQL query
-const financialsQuery = fs.readFileSync(path.join(__dirname, 'financials.sql'), 'utf8');
 
 // Middleware to parse JSON bodies
 app.use(express.json());
@@ -119,6 +197,16 @@ app.get('/api/companies', (req, res) => {
 });
 
 // Start the server
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-});
+async function startServer() {
+  try {
+    await initializeDatabase();
+    app.listen(PORT, () => {
+      console.log(`Server is running on http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+startServer();
