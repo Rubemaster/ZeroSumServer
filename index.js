@@ -93,26 +93,42 @@ async function initializeDatabase() {
   console.log('Database initialized successfully');
 }
 
-// Initialize Alpaca client if credentials are provided
+// Initialize Alpaca client if any credentials are provided
 let alpacaClient = null;
-if (process.env.ALPACA_CLIENT_ID && process.env.ALPACA_PRIVATE_KEY) {
-  try {
-    // Reconstruct PEM format from base64 key
-    const privateKeyBase64 = process.env.ALPACA_PRIVATE_KEY;
-    const privateKey = `-----BEGIN PRIVATE KEY-----\n${privateKeyBase64}\n-----END PRIVATE KEY-----`;
+const hasMarketDataCreds = process.env.ALPACA_API_KEY && process.env.ALPACA_API_SECRET;
+const hasBrokerCreds = process.env.ALPACA_CLIENT_ID && process.env.ALPACA_PRIVATE_KEY;
 
-    alpacaClient = new AlpacaClient(
-      process.env.ALPACA_CLIENT_ID,
-      privateKey,
-      process.env.ALPACA_BASE_URL
-    );
-    console.log('Alpaca Broker API integration enabled');
+if (hasMarketDataCreds || hasBrokerCreds) {
+  try {
+    const config = {
+      // Trading/Data API credentials (for market data)
+      apiKey: process.env.ALPACA_API_KEY,
+      apiSecret: process.env.ALPACA_API_SECRET,
+      // Broker API OAuth credentials
+      clientId: process.env.ALPACA_CLIENT_ID,
+      baseURL: process.env.ALPACA_BASE_URL
+    };
+
+    // Reconstruct PEM format from base64 key if provided
+    if (process.env.ALPACA_PRIVATE_KEY) {
+      const privateKeyBase64 = process.env.ALPACA_PRIVATE_KEY;
+      config.privateKey = `-----BEGIN PRIVATE KEY-----\n${privateKeyBase64}\n-----END PRIVATE KEY-----`;
+    }
+
+    alpacaClient = new AlpacaClient(config);
+
+    if (hasMarketDataCreds) {
+      console.log('Alpaca Market Data API enabled');
+    }
+    if (hasBrokerCreds) {
+      console.log('Alpaca Broker API integration enabled');
+    }
   } catch (error) {
     console.error('Error initializing Alpaca client:', error.message);
-    console.log('Running without ticker enrichment');
+    console.log('Running without Alpaca integration');
   }
 } else {
-  console.log('Alpaca credentials not found - running without ticker enrichment');
+  console.log('Alpaca credentials not found - running without Alpaca integration');
 }
 
 // Middleware to parse JSON bodies

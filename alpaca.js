@@ -2,11 +2,17 @@ const axios = require('axios');
 const jwt = require('jsonwebtoken');
 
 class AlpacaClient {
-  constructor(clientId, privateKey, baseURL) {
-    this.clientId = clientId;
-    this.privateKey = privateKey;
-    this.baseURL = baseURL || 'https://broker-api.sandbox.alpaca.markets';
+  constructor(config) {
+    // Broker API OAuth credentials
+    this.clientId = config.clientId;
+    this.privateKey = config.privateKey;
+    this.baseURL = config.baseURL || 'https://broker-api.sandbox.alpaca.markets';
+
+    // Trading/Data API credentials (for market data)
+    this.apiKey = config.apiKey;
+    this.apiSecret = config.apiSecret;
     this.dataURL = 'https://data.alpaca.markets'; // Market data API endpoint
+
     this.cache = new Map(); // Cache ticker lookups
     this.accessToken = null;
     this.tokenExpiry = null;
@@ -182,6 +188,19 @@ class AlpacaClient {
   }
 
   /**
+   * Get headers for market data API requests (uses API key auth, not OAuth)
+   */
+  getMarketDataHeaders() {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('Market data API credentials not configured. Set ALPACA_API_KEY and ALPACA_API_SECRET.');
+    }
+    return {
+      'APCA-API-KEY-ID': this.apiKey,
+      'APCA-API-SECRET-KEY': this.apiSecret
+    };
+  }
+
+  /**
    * Get historical price bars for a stock
    * @param {string} symbol - Stock ticker symbol (e.g., 'AAPL')
    * @param {Object} options - Query options
@@ -203,8 +222,6 @@ class AlpacaClient {
     } = options;
 
     try {
-      const token = await this.getAccessToken();
-
       const params = {
         timeframe,
         limit,
@@ -218,9 +235,7 @@ class AlpacaClient {
       const response = await axios.get(
         `${this.dataURL}/v2/stocks/${symbol}/bars`,
         {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          },
+          headers: this.getMarketDataHeaders(),
           params
         }
       );
@@ -243,14 +258,10 @@ class AlpacaClient {
    */
   async getLatestQuote(symbol) {
     try {
-      const token = await this.getAccessToken();
-
       const response = await axios.get(
         `${this.dataURL}/v2/stocks/${symbol}/quotes/latest`,
         {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          },
+          headers: this.getMarketDataHeaders(),
           params: { feed: 'iex' }
         }
       );
@@ -268,14 +279,10 @@ class AlpacaClient {
    */
   async getLatestTrade(symbol) {
     try {
-      const token = await this.getAccessToken();
-
       const response = await axios.get(
         `${this.dataURL}/v2/stocks/${symbol}/trades/latest`,
         {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          },
+          headers: this.getMarketDataHeaders(),
           params: { feed: 'iex' }
         }
       );
