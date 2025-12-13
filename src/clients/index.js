@@ -1,0 +1,9 @@
+const AlpacaClient = require('./alpaca');
+const FinnhubClient = require('./finnhub');
+const YahooFinanceClient = require('./yahoo-finance');
+
+module.exports = {
+  AlpacaClient,
+  FinnhubClient,
+  YahooFinanceClient
+};
