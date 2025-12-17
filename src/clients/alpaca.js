@@ -116,6 +116,31 @@ class AlpacaClient {
     }
   }
 
+  async getAccountByEmail(email) {
+    try {
+      const response = await this.makeAuthenticatedRequest(
+        `${this.brokerURL}/v1/accounts`,
+        { query: email }
+      );
+
+      // Find account with matching email
+      const accounts = response.data;
+      if (accounts && accounts.length > 0) {
+        const account = accounts.find(acc =>
+          acc.contact?.email_address?.toLowerCase() === email.toLowerCase()
+        );
+        return account || null;
+      }
+      return null;
+    } catch (error) {
+      if (error.response?.status === 404) {
+        return null;
+      }
+      console.error(`Error looking up account by email ${email}:`, error.message);
+      return null;
+    }
+  }
+
   async enrichFinancialData(financialRecord) {
     const companyName = financialRecord.name;
     const cik = String(financialRecord.cik);

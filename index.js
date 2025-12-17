@@ -488,6 +488,31 @@ app.get('/api/kyc/status', requireAuth(), async (req, res) => {
   const { userId } = getAuth(req);
 
   try {
+    // Get user email from Clerk
+    const user = await clerkClient.users.getUser(userId);
+    const email = user.emailAddresses?.[0]?.emailAddress;
+
+    // Check for existing Alpaca account
+    let alpacaAccount = null;
+    if (alpacaClient && email) {
+      alpacaAccount = await alpacaClient.getAccountByEmail(email);
+    }
+
+    // If user has Alpaca account, they're verified
+    if (alpacaAccount) {
+      return res.json({
+        reviewStatus: 'completed',
+        reviewResult: { reviewAnswer: 'GREEN' },
+        alpacaAccount: {
+          id: alpacaAccount.id,
+          status: alpacaAccount.status,
+          accountNumber: alpacaAccount.account_number,
+        },
+        message: 'Alpaca account found'
+      });
+    }
+
+    // Otherwise check Sumsub status
     const applicant = await sumsubClient.getApplicantByExternalId(userId);
     const status = await sumsubClient.getApplicantStatus(applicant.id);
 
@@ -496,6 +521,7 @@ app.get('/api/kyc/status', requireAuth(), async (req, res) => {
       reviewStatus: applicant.review?.reviewStatus || 'init',
       reviewResult: applicant.review?.reviewResult || null,
       requiredDocs: status,
+      alpacaAccount: null,
     });
   } catch (error) {
     // If applicant doesn't exist yet, return pending status
@@ -503,6 +529,7 @@ app.get('/api/kyc/status', requireAuth(), async (req, res) => {
       return res.json({
         reviewStatus: 'init',
         reviewResult: null,
+        alpacaAccount: null,
         message: 'Verification not started'
       });
     }
