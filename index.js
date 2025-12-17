@@ -5,8 +5,8 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
-const { clerkMiddleware, requireAuth, getAuth } = require('@clerk/express');
-const { AlpacaClient, FinnhubClient, YahooFinanceClient } = require('./src/clients');
+const { clerkMiddleware, requireAuth, getAuth, clerkClient } = require('@clerk/express');
+const { AlpacaClient, FinnhubClient, YahooFinanceClient, SumsubClient } = require('./src/clients');
 const RedisCache = require('./src/cache/redis');
 const { TimeSeriesCalculator, CALCULATIONS } = require('./src/services/timeSeries');
 
@@ -120,6 +120,16 @@ let finnhubClient = null;
 
 // Initialize Yahoo Finance client (cache will be set after Redis connects)
 let yahooFinance = null;
+
+// Initialize Sumsub client for KYC verification
+let sumsubClient = null;
+if (process.env.SUMSUB_APP_TOKEN && process.env.SUMSUB_SECRET_KEY) {
+  sumsubClient = new SumsubClient(
+    process.env.SUMSUB_APP_TOKEN,
+    process.env.SUMSUB_SECRET_KEY
+  );
+  console.log('Sumsub KYC verification enabled');
+}
 
 // Middleware to parse JSON bodies
 app.use(express.json());
@@ -526,6 +536,139 @@ app.get('/api/yahoo/quote/:symbol', requireAuth(), async (req, res) => {
 app.get('/api/user', requireAuth(), (req, res) => {
   const { userId } = getAuth(req);
   res.json({ userId });
+});
+
+// ============ Onboarding Data Endpoints ============
+
+// Get saved onboarding data from Clerk private metadata
+app.get('/api/onboarding', requireAuth(), async (req, res) => {
+  const { userId } = getAuth(req);
+
+  try {
+    const user = await clerkClient.users.getUser(userId);
+    const onboardingData = user.privateMetadata?.onboarding || {};
+    res.json(onboardingData);
+  } catch (error) {
+    console.error('Failed to get onboarding data:', error);
+    res.status(500).json({
+      error: 'Failed to get onboarding data',
+      details: error.message
+    });
+  }
+});
+
+// Save onboarding data to Clerk private metadata
+app.put('/api/onboarding', requireAuth(), async (req, res) => {
+  const { userId } = getAuth(req);
+  const onboardingData = req.body;
+
+  try {
+    await clerkClient.users.updateUserMetadata(userId, {
+      privateMetadata: {
+        onboarding: onboardingData
+      }
+    });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to save onboarding data:', error);
+    res.status(500).json({
+      error: 'Failed to save onboarding data',
+      details: error.message
+    });
+  }
+});
+
+// Submit final onboarding data (POST - for completion)
+app.post('/api/onboarding', requireAuth(), async (req, res) => {
+  const { userId } = getAuth(req);
+  const onboardingData = req.body;
+
+  try {
+    // Save to private metadata with completed flag
+    await clerkClient.users.updateUserMetadata(userId, {
+      privateMetadata: {
+        onboarding: {
+          ...onboardingData,
+          completedAt: new Date().toISOString()
+        }
+      }
+    });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to submit onboarding data:', error);
+    res.status(500).json({
+      error: 'Failed to submit onboarding data',
+      details: error.message
+    });
+  }
+});
+
+// ============ Sumsub KYC Endpoints ============
+
+// Generate Sumsub access token for Web SDK
+app.post('/api/kyc/token', requireAuth(), async (req, res) => {
+  if (!sumsubClient) {
+    return res.status(503).json({
+      error: 'KYC verification not available',
+      details: 'Sumsub client not configured'
+    });
+  }
+
+  const { userId } = getAuth(req);
+  const levelName = process.env.SUMSUB_LEVEL_NAME || 'basic-kyc-level';
+
+  try {
+    const tokenData = await sumsubClient.generateAccessToken(userId, levelName);
+    res.json({
+      token: tokenData.token,
+      userId: tokenData.userId,
+    });
+  } catch (error) {
+    console.error('Sumsub token generation error:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to generate KYC access token',
+      details: error.response?.data?.description || error.message
+    });
+  }
+});
+
+// Get KYC verification status
+app.get('/api/kyc/status', requireAuth(), async (req, res) => {
+  if (!sumsubClient) {
+    return res.status(503).json({
+      error: 'KYC verification not available',
+      details: 'Sumsub client not configured'
+    });
+  }
+
+  const { userId } = getAuth(req);
+
+  try {
+    const applicant = await sumsubClient.getApplicantByExternalId(userId);
+    const status = await sumsubClient.getApplicantStatus(applicant.id);
+
+    res.json({
+      applicantId: applicant.id,
+      reviewStatus: applicant.review?.reviewStatus || 'init',
+      reviewResult: applicant.review?.reviewResult || null,
+      requiredDocs: status,
+    });
+  } catch (error) {
+    // If applicant doesn't exist yet, return pending status
+    if (error.response?.status === 404) {
+      return res.json({
+        reviewStatus: 'init',
+        reviewResult: null,
+        message: 'Verification not started'
+      });
+    }
+
+    console.error('Sumsub status check error:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to get KYC status',
+      details: error.response?.data?.description || error.message
+    });
+  }
 });
 
 // Start the server
