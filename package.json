@@ -16,7 +16,6 @@
     "@clerk/express": "^1.7.57",
     "axios": "^1.13.2",
     "dotenv": "^17.2.3",
-    "duckdb": "^1.4.3",
     "express": "^5.2.1",
     "finnhub": "^2.0.12",
     "jsonwebtoken": "^9.0.3",
