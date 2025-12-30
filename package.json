@@ -14,11 +14,16 @@
   "type": "commonjs",
   "dependencies": {
     "@clerk/express": "^1.7.57",
+    "@supabase/supabase-js": "^2.89.0",
     "axios": "^1.13.2",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "finnhub": "^2.0.12",
     "jsonwebtoken": "^9.0.3",
-    "redis": "^5.10.0"
+    "pg": "^8.16.3",
+    "pg-copy-streams": "^7.0.0",
+    "postgres": "^3.4.7",
+    "redis": "^5.10.0",
+    "stripe": "^20.1.0"
   }
 }

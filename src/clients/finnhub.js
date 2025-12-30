@@ -1,18 +1,15 @@
 const axios = require('axios');
+const cacheRulesManager = require('../cache/cache-rules');
 
 class FinnhubClient {
   constructor(apiKey, cache = null) {
     this.apiKey = apiKey;
     this.baseURL = 'https://finnhub.io/api/v1';
     this.cache = cache;
-    this.cacheTTL = {
-      quote: 60,           // 1 minute for quotes
-      candles: 300,        // 5 minutes for candles
-      profile: 86400,      // 24 hours for company profile
-      financials: 3600,    // 1 hour for financials
-      search: 86400,       // 24 hours for search results
-      news: 300            // 5 minutes for news
-    };
+  }
+
+  getTTL(key) {
+    return cacheRulesManager.getTTL('finnhub', key);
   }
 
   async makeRequest(endpoint, params = {}) {
@@ -37,7 +34,7 @@ class FinnhubClient {
     const sym = symbol.toUpperCase();
     const cacheKey = `finnhub:quote:${sym}`;
 
-    return this.cachedRequest(cacheKey, this.cacheTTL.quote, async () => {
+    return this.cachedRequest(cacheKey, this.getTTL('quote'), async () => {
       const data = await this.makeRequest('/quote', { symbol: sym });
       return {
         symbol: sym,
@@ -62,7 +59,7 @@ class FinnhubClient {
 
     const cacheKey = `finnhub:candles:${sym}:${resolution}:${fromTs}:${toTs}`;
 
-    return this.cachedRequest(cacheKey, this.cacheTTL.candles, async () => {
+    return this.cachedRequest(cacheKey, this.getTTL('candles'), async () => {
       const data = await this.makeRequest('/stock/candle', {
         symbol: sym,
         resolution,
@@ -96,7 +93,7 @@ class FinnhubClient {
     const sym = symbol.toUpperCase();
     const cacheKey = `finnhub:profile:${sym}`;
 
-    return this.cachedRequest(cacheKey, this.cacheTTL.profile, async () => {
+    return this.cachedRequest(cacheKey, this.getTTL('profile'), async () => {
       return this.makeRequest('/stock/profile2', { symbol: sym });
     });
   }
@@ -104,7 +101,7 @@ class FinnhubClient {
   async searchSymbols(query) {
     const cacheKey = `finnhub:search:${query.toLowerCase()}`;
 
-    return this.cachedRequest(cacheKey, this.cacheTTL.search, async () => {
+    return this.cachedRequest(cacheKey, this.getTTL('search'), async () => {
       const data = await this.makeRequest('/search', { q: query });
       return data.result || [];
     });
@@ -114,7 +111,7 @@ class FinnhubClient {
     const sym = symbol.toUpperCase();
     const cacheKey = `finnhub:financials:${sym}`;
 
-    return this.cachedRequest(cacheKey, this.cacheTTL.financials, async () => {
+    return this.cachedRequest(cacheKey, this.getTTL('financials'), async () => {
       return this.makeRequest('/stock/metric', { symbol: sym, metric: 'all' });
     });
   }
@@ -129,7 +126,7 @@ class FinnhubClient {
       const toDate = to || today;
       const cacheKey = `finnhub:news:${sym}:${fromDate}:${toDate}`;
 
-      return this.cachedRequest(cacheKey, this.cacheTTL.news, async () => {
+      return this.cachedRequest(cacheKey, this.getTTL('news'), async () => {
         return this.makeRequest('/company-news', {
           symbol: sym,
           from: fromDate,
@@ -139,7 +136,7 @@ class FinnhubClient {
     } else {
       const cacheKey = `finnhub:news:general`;
 
-      return this.cachedRequest(cacheKey, this.cacheTTL.news, async () => {
+      return this.cachedRequest(cacheKey, this.getTTL('news'), async () => {
         return this.makeRequest('/news', { category: 'general' });
       });
     }
@@ -162,7 +159,7 @@ class FinnhubClient {
     const sym = symbol.toUpperCase();
     const cacheKey = `finnhub:series:${sym}:${frequency}`;
 
-    return this.cachedRequest(cacheKey, this.cacheTTL.financials, async () => {
+    return this.cachedRequest(cacheKey, this.getTTL('financials'), async () => {
       const data = await this.makeRequest('/stock/metric', { symbol: sym, metric: 'all' });
       const series = frequency === 'quarterly' ? data.series?.quarterly : data.series?.annual;
       return {

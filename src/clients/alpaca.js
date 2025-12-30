@@ -72,6 +72,45 @@ class AlpacaClient {
     });
   }
 
+  async makeAuthenticatedPost(url, data = {}) {
+    const token = await this.getAccessToken();
+    return axios.post(url, data, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+
+  async makeAuthenticatedPut(url, data = {}) {
+    const token = await this.getAccessToken();
+    return axios.put(url, data, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+
+  async makeAuthenticatedDelete(url) {
+    const token = await this.getAccessToken();
+    return axios.delete(url, {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+  }
+
+  async makeAuthenticatedPatch(url, data = {}) {
+    const token = await this.getAccessToken();
+    return axios.patch(url, data, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+
   async getAssetBySymbol(symbol) {
     const cacheKey = `symbol_${symbol}`;
     if (this.cache.has(cacheKey)) {
@@ -118,18 +157,22 @@ class AlpacaClient {
 
   async getAccountByEmail(email) {
     try {
+      console.log(`[AlpacaClient] Searching accounts with query: ${email}`);
       const response = await this.makeAuthenticatedRequest(
         `${this.brokerURL}/v1/accounts`,
         { query: email }
       );
 
-      // Find account with matching email
       const accounts = response.data;
+      console.log(`[AlpacaClient] Query returned ${accounts?.length || 0} accounts`);
+
       if (accounts && accounts.length > 0) {
-        const account = accounts.find(acc =>
-          acc.contact?.email_address?.toLowerCase() === email.toLowerCase()
-        );
-        return account || null;
+        // The query parameter searches by email, so if we get results, they match
+        // The list endpoint returns abbreviated data (contact.email_address may be undefined)
+        // Trust the first result from the email query
+        const account = accounts[0];
+        console.log(`[AlpacaClient] Found account: id=${account.id}, status=${account.status}`);
+        return account;
       }
       return null;
     } catch (error) {
@@ -138,6 +181,192 @@ class AlpacaClient {
       }
       console.error(`Error looking up account by email ${email}:`, error.message);
       return null;
+    }
+  }
+
+  async getTradingAccount(accountId) {
+    try {
+      const response = await this.makeAuthenticatedRequest(
+        `${this.brokerURL}/v1/trading/accounts/${accountId}/account`
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error getting trading account ${accountId}:`, error.message);
+      return null;
+    }
+  }
+
+  async getPositions(accountId) {
+    try {
+      const response = await this.makeAuthenticatedRequest(
+        `${this.brokerURL}/v1/trading/accounts/${accountId}/positions`
+      );
+      return response.data || [];
+    } catch (error) {
+      console.error(`Error getting positions for account ${accountId}:`, error.message);
+      return [];
+    }
+  }
+
+  // Watchlist methods
+  async getWatchlists(accountId) {
+    try {
+      const response = await this.makeAuthenticatedRequest(
+        `${this.brokerURL}/v1/trading/accounts/${accountId}/watchlists`
+      );
+      console.log(`[Alpaca] getWatchlists response:`, JSON.stringify(response.data, null, 2));
+      return response.data || [];
+    } catch (error) {
+      console.error(`Error getting watchlists for account ${accountId}:`, error.message);
+      return [];
+    }
+  }
+
+  async getWatchlist(accountId, watchlistId) {
+    try {
+      const response = await this.makeAuthenticatedRequest(
+        `${this.brokerURL}/v1/trading/accounts/${accountId}/watchlists/${watchlistId}`
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error getting watchlist ${watchlistId}:`, error.message);
+      return null;
+    }
+  }
+
+  async createWatchlist(accountId, name, symbols = []) {
+    try {
+      const response = await this.makeAuthenticatedPost(
+        `${this.brokerURL}/v1/trading/accounts/${accountId}/watchlists`,
+        { name, symbols }
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error creating watchlist:`, error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async addToWatchlist(accountId, watchlistId, symbol) {
+    try {
+      console.log(`[Alpaca] Adding ${symbol} to watchlist ${watchlistId}`);
+      const response = await this.makeAuthenticatedPost(
+        `${this.brokerURL}/v1/trading/accounts/${accountId}/watchlists/${watchlistId}`,
+        { symbol }
+      );
+      console.log(`[Alpaca] addToWatchlist response:`, JSON.stringify(response.data, null, 2));
+      return response.data;
+    } catch (error) {
+      // Handle duplicate symbol error - symbol already exists, just fetch current watchlist
+      if (error.response?.data?.code === 40010001) {
+        console.log(`[Alpaca] Symbol ${symbol} already in watchlist, fetching current state`);
+        return this.getWatchlist(accountId, watchlistId);
+      }
+      console.error(`Error adding ${symbol} to watchlist:`, error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async removeFromWatchlist(accountId, watchlistId, symbol) {
+    try {
+      const response = await this.makeAuthenticatedDelete(
+        `${this.brokerURL}/v1/trading/accounts/${accountId}/watchlists/${watchlistId}/${symbol}`
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error removing ${symbol} from watchlist:`, error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  // Portfolio history
+  async getPortfolioHistory(accountId, period = '1M', timeframe = '1D') {
+    try {
+      const response = await this.makeAuthenticatedRequest(
+        `${this.brokerURL}/v1/trading/accounts/${accountId}/account/portfolio/history`,
+        { period, timeframe }
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error getting portfolio history for account ${accountId}:`, error.message);
+      return null;
+    }
+  }
+
+  // Get orders (for purchase history)
+  async getOrders(accountId, status = 'all', limit = 100) {
+    try {
+      const response = await this.makeAuthenticatedRequest(
+        `${this.brokerURL}/v1/trading/accounts/${accountId}/orders`,
+        { status, limit }
+      );
+      return response.data || [];
+    } catch (error) {
+      console.error(`Error getting orders for account ${accountId}:`, error.message);
+      return [];
+    }
+  }
+
+  // Get account activities (for cash history reconstruction)
+  async getAccountActivities(accountId, activityTypes = null, after = null, until = null) {
+    try {
+      const params = {};
+      if (activityTypes) params.activity_types = activityTypes;
+      if (after) params.after = after;
+      if (until) params.until = until;
+
+      const response = await this.makeAuthenticatedRequest(
+        `${this.brokerURL}/v1/trading/accounts/${accountId}/account/activities`,
+        params
+      );
+      return response.data || [];
+    } catch (error) {
+      console.error(`Error getting account activities for ${accountId}:`, error.message);
+      return [];
+    }
+  }
+
+  async getAccountById(accountId) {
+    try {
+      const response = await this.makeAuthenticatedRequest(
+        `${this.brokerURL}/v1/accounts/${accountId}`
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error getting account ${accountId}:`, error.message);
+      return null;
+    }
+  }
+
+  async updateAccount(accountId, updates) {
+    try {
+      const response = await this.makeAuthenticatedPatch(
+        `${this.brokerURL}/v1/accounts/${accountId}`,
+        updates
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error updating account ${accountId}:`, error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async getAllAccounts() {
+    try {
+      const response = await this.makeAuthenticatedRequest(
+        `${this.brokerURL}/v1/accounts`
+      );
+      const accountList = response.data || [];
+
+      // Fetch full details for each account
+      const fullAccounts = await Promise.all(
+        accountList.map(acc => this.getAccountById(acc.id))
+      );
+
+      return fullAccounts.filter(acc => acc !== null);
+    } catch (error) {
+      console.error('Error getting all accounts:', error.message);
+      return [];
     }
   }
 

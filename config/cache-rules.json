@@ -1,0 +1,23 @@
+{
+  "finnhub": {
+    "quote": 604800,
+    "candles": 604800,
+    "profile": 604800,
+    "financials": 604800,
+    "search": 604800,
+    "news": 604800
+  },
+  "polygon": {
+    "tickers": 604800,
+    "tickerDetails": 604800
+  },
+  "yahoo": {
+    "history": 604800,
+    "historyArchive": 604800,
+    "quote": 604800
+  },
+  "sec": {
+    "filings": 604800
+  },
+  "default": 604800
+}

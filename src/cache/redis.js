@@ -59,8 +59,157 @@ class RedisCache {
     return { data, fromCache: false };
   }
 
+  // Store permanently (no TTL)
+  async setPermanent(key, value) {
+    if (!this.connected) return false;
+    try {
+      await this.client.set(key, JSON.stringify(value));
+      return true;
+    } catch (error) {
+      console.error('Redis setPermanent error:', error.message);
+      return false;
+    }
+  }
+
+  // Add item to a sorted set with score (for timeline)
+  async addToSortedSet(key, score, value) {
+    if (!this.connected) return false;
+    try {
+      await this.client.zAdd(key, { score, value: JSON.stringify(value) });
+      return true;
+    } catch (error) {
+      console.error('Redis addToSortedSet error:', error.message);
+      return false;
+    }
+  }
+
+  // Get items from sorted set by score range (descending - newest first)
+  async getFromSortedSet(key, start = 0, end = -1) {
+    if (!this.connected) return [];
+    try {
+      const results = await this.client.zRange(key, start, end, { REV: true });
+      return results.map(item => JSON.parse(item));
+    } catch (error) {
+      console.error('Redis getFromSortedSet error:', error.message);
+      return [];
+    }
+  }
+
+  // Check if member exists in sorted set
+  async existsInSortedSet(key, value) {
+    if (!this.connected) return false;
+    try {
+      const score = await this.client.zScore(key, JSON.stringify(value));
+      return score !== null;
+    } catch (error) {
+      console.error('Redis existsInSortedSet error:', error.message);
+      return false;
+    }
+  }
+
+  // Check if a filing ID exists (by checking a simple key)
+  async hasFilingId(id) {
+    if (!this.connected) return false;
+    try {
+      const exists = await this.client.exists(`sec:filing:${id}`);
+      return exists === 1;
+    } catch (error) {
+      console.error('Redis hasFilingId error:', error.message);
+      return false;
+    }
+  }
+
+  // Get count of items in sorted set
+  async getSortedSetCount(key) {
+    if (!this.connected) return 0;
+    try {
+      return await this.client.zCard(key);
+    } catch (error) {
+      console.error('Redis getSortedSetCount error:', error.message);
+      return 0;
+    }
+  }
+
   generateKey(prefix, ...parts) {
     return `${prefix}:${parts.join(':')}`;
+  }
+
+  async clearByPrefix(prefix) {
+    if (!this.connected) return { success: false, deleted: 0 };
+    try {
+      let cursor = '0';
+      let totalDeleted = 0;
+
+      do {
+        const result = await this.client.scan(cursor, {
+          MATCH: `${prefix}:*`,
+          COUNT: 100
+        });
+        cursor = String(result.cursor);
+        const keys = result.keys;
+
+        if (keys.length > 0) {
+          await this.client.del(keys);
+          totalDeleted += keys.length;
+        }
+      } while (cursor !== '0');
+
+      return { success: true, deleted: totalDeleted };
+    } catch (error) {
+      console.error('Redis clearByPrefix error:', error.message);
+      return { success: false, deleted: 0 };
+    }
+  }
+
+  async getCacheStats() {
+    if (!this.connected) return null;
+    try {
+      const stats = {
+        finnhub: { count: 0, size: 0 },
+        polygon: { count: 0, size: 0 },
+        yahoo: { count: 0, size: 0 },
+        sec: { count: 0, size: 0 },
+        other: { count: 0, size: 0 },
+      };
+
+      let cursor = '0';
+      do {
+        const result = await this.client.scan(cursor, { COUNT: 100 });
+        cursor = String(result.cursor);
+        const keys = result.keys;
+
+        for (const key of keys) {
+          let memoryUsage = 0;
+          try {
+            memoryUsage = await this.client.memoryUsage(key) || 0;
+          } catch {
+            memoryUsage = 0;
+          }
+
+          if (key.startsWith('finnhub:')) {
+            stats.finnhub.count++;
+            stats.finnhub.size += memoryUsage;
+          } else if (key.startsWith('polygon:')) {
+            stats.polygon.count++;
+            stats.polygon.size += memoryUsage;
+          } else if (key.startsWith('yahoo:')) {
+            stats.yahoo.count++;
+            stats.yahoo.size += memoryUsage;
+          } else if (key.startsWith('sec:')) {
+            stats.sec.count++;
+            stats.sec.size += memoryUsage;
+          } else {
+            stats.other.count++;
+            stats.other.size += memoryUsage;
+          }
+        }
+      } while (cursor !== '0');
+
+      return stats;
+    } catch (error) {
+      console.error('Redis getCacheStats error:', error.message);
+      return null;
+    }
   }
 }
 

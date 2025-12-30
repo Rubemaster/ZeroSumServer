@@ -9,3 +9,4 @@ yarn-error.log*
 *.duckdb.wal
 *.pem
 alpaca-private-key.pem
+.db-connection
