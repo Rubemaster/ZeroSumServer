@@ -4752,10 +4752,23 @@ app.get('/api/admin/sec/daily-indices/years', requireAuth(), requireAdmin(), asy
 });
 
 // Start the server
-async function startServer() {
+async function initializeServices() {
   try {
-    // Initialize Redis cache
-    await redisCache.connect();
+    // Initialize Redis cache (with timeout to prevent hanging)
+    if (process.env.REDIS_URL) {
+      const connectPromise = redisCache.connect();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Redis connection timeout')), 5000)
+      );
+      try {
+        await Promise.race([connectPromise, timeoutPromise]);
+      } catch (error) {
+        console.warn('Redis connection failed or timed out:', error.message);
+        console.log('Server will continue without Redis caching');
+      }
+    } else {
+      console.log('REDIS_URL not set - caching disabled');
+    }
 
     // Load API keys from Supabase (encrypted storage)
     await loadApiKeysFromSupabase();
@@ -4833,16 +4846,25 @@ async function startServer() {
       secPollingInterval = setInterval(poll, 60000);
     };
 
-    startSECPolling().catch(console.error);
+    if (secClient) {
+      startSECPolling().catch(console.error);
+    }
 
-    app.listen(PORT, () => {
-      console.log(`Server is running on http://localhost:${PORT}`);
-      console.log('Clerk authentication enabled');
-    });
+    console.log('All services initialized');
   } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
+    console.error('Error initializing services:', error.message);
   }
+}
+
+function startServer() {
+  // Start HTTP server immediately to bind to port
+  app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
+    console.log('Clerk authentication enabled');
+
+    // Initialize services in the background after server starts
+    initializeServices().catch(console.error);
+  });
 }
 
 startServer();
