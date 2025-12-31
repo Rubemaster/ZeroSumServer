@@ -351,6 +351,20 @@ class AlpacaClient {
     }
   }
 
+  async createAccount(accountData) {
+    try {
+      const response = await this.makeAuthenticatedPost(
+        `${this.brokerURL}/v1/accounts`,
+        accountData
+      );
+      console.log(`[AlpacaClient] Created account: id=${response.data.id}, status=${response.data.status}`);
+      return response.data;
+    } catch (error) {
+      console.error('Error creating account:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
   async getAllAccounts() {
     try {
       const response = await this.makeAuthenticatedRequest(
@@ -367,6 +381,43 @@ class AlpacaClient {
     } catch (error) {
       console.error('Error getting all accounts:', error.message);
       return [];
+    }
+  }
+
+  // API Key Management for Retail Trading Access
+  async createApiKey(accountId) {
+    try {
+      const response = await this.makeAuthenticatedPost(
+        `${this.brokerURL}/v1/accounts/${accountId}/keys`
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error creating API key for account ${accountId}:`, error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async listApiKeys(accountId) {
+    try {
+      const response = await this.makeAuthenticatedRequest(
+        `${this.brokerURL}/v1/accounts/${accountId}/keys`
+      );
+      return response.data || [];
+    } catch (error) {
+      console.error(`Error listing API keys for account ${accountId}:`, error.message);
+      return [];
+    }
+  }
+
+  async deleteApiKey(accountId, keyId) {
+    try {
+      const response = await this.makeAuthenticatedDelete(
+        `${this.brokerURL}/v1/accounts/${accountId}/keys/${keyId}`
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error deleting API key ${keyId}:`, error.response?.data || error.message);
+      throw error;
     }
   }
 
@@ -421,4 +472,142 @@ class AlpacaClient {
   }
 }
 
-module.exports = AlpacaClient;
+// Individual Alpaca Client - uses API Key + Secret authentication (retail trading API)
+class IndividualAlpacaClient {
+  constructor(apiKeyId, apiSecret, isPaper = true) {
+    this.apiKeyId = apiKeyId;
+    this.apiSecret = apiSecret;
+    this.baseURL = isPaper
+      ? 'https://paper-api.alpaca.markets'
+      : 'https://api.alpaca.markets';
+    this.dataURL = 'https://data.alpaca.markets';
+  }
+
+  getHeaders() {
+    return {
+      'APCA-API-KEY-ID': this.apiKeyId,
+      'APCA-API-SECRET-KEY': this.apiSecret,
+      'Content-Type': 'application/json'
+    };
+  }
+
+  async getAccount() {
+    try {
+      const response = await axios.get(`${this.baseURL}/v2/account`, {
+        headers: this.getHeaders()
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error getting individual account:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async getPositions() {
+    try {
+      const response = await axios.get(`${this.baseURL}/v2/positions`, {
+        headers: this.getHeaders()
+      });
+      return response.data || [];
+    } catch (error) {
+      console.error('Error getting individual positions:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async getOrders(status = 'all', limit = 100) {
+    try {
+      const response = await axios.get(`${this.baseURL}/v2/orders`, {
+        headers: this.getHeaders(),
+        params: { status, limit }
+      });
+      return response.data || [];
+    } catch (error) {
+      console.error('Error getting individual orders:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async placeOrder(orderData) {
+    // orderData: { symbol, qty, side, type, time_in_force, limit_price?, stop_price? }
+    try {
+      const response = await axios.post(`${this.baseURL}/v2/orders`, orderData, {
+        headers: this.getHeaders()
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error placing order:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async cancelOrder(orderId) {
+    try {
+      const response = await axios.delete(`${this.baseURL}/v2/orders/${orderId}`, {
+        headers: this.getHeaders()
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error canceling order:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async cancelAllOrders() {
+    try {
+      const response = await axios.delete(`${this.baseURL}/v2/orders`, {
+        headers: this.getHeaders()
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error canceling all orders:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async getPortfolioHistory(period = '1M', timeframe = '1D') {
+    try {
+      const response = await axios.get(`${this.baseURL}/v2/account/portfolio/history`, {
+        headers: this.getHeaders(),
+        params: { period, timeframe }
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error getting portfolio history:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async getActivities(activityTypes = null, after = null, until = null) {
+    try {
+      const params = {};
+      if (activityTypes) params.activity_types = activityTypes;
+      if (after) params.after = after;
+      if (until) params.until = until;
+
+      const response = await axios.get(`${this.baseURL}/v2/account/activities`, {
+        headers: this.getHeaders(),
+        params
+      });
+      return response.data || [];
+    } catch (error) {
+      console.error('Error getting activities:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  // Get latest quote for a symbol
+  async getQuote(symbol) {
+    try {
+      const response = await axios.get(`${this.dataURL}/v2/stocks/${symbol}/quotes/latest`, {
+        headers: this.getHeaders()
+      });
+      return response.data;
+    } catch (error) {
+      console.error(`Error getting quote for ${symbol}:`, error.response?.data || error.message);
+      throw error;
+    }
+  }
+}
+
+module.exports = { AlpacaClient, IndividualAlpacaClient };

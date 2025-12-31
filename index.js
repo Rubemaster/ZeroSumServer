@@ -4,10 +4,11 @@ const fs = require('fs');
 const path = require('path');
 const { Client } = require('pg');
 const { clerkMiddleware, requireAuth, getAuth, clerkClient, verifyToken } = require('@clerk/express');
-const { AlpacaClient, FinnhubClient, YahooFinanceClient, SumsubClient, PolygonClient, SECClient, SupabaseClient } = require('./src/clients');
+const { AlpacaClient, IndividualAlpacaClient, FinnhubClient, YahooFinanceClient, SumsubClient, PolygonClient, SECClient, SupabaseClient } = require('./src/clients');
 const RedisCache = require('./src/cache/redis');
 const cacheRulesManager = require('./src/cache/cache-rules');
 const { TimeSeriesCalculator, CALCULATIONS } = require('./src/services/timeSeries');
+const { encrypt, decrypt, isEncryptionConfigured } = require('./src/utils/encryption');
 
 // Initialize Stripe
 const stripe = process.env.STRIPE_SECRET_KEY
@@ -59,12 +60,14 @@ if (process.env.SUMSUB_APP_TOKEN && process.env.SUMSUB_SECRET_KEY) {
 }
 
 // Initialize Supabase client
-let supabaseClient = null;
+let supabaseClient = new SupabaseClient();
 if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
-  supabaseClient = new SupabaseClient();
   console.log('Supabase database enabled');
+} else if (supabaseClient.hasStoredConnectionString()) {
+  console.log('Database enabled via stored connection string');
 } else {
-  console.log('Supabase credentials not found - database features disabled');
+  console.log('Database credentials not found - database features disabled');
+  supabaseClient = null;
 }
 
 // Initialize SEC client (will use Supabase)
@@ -110,6 +113,28 @@ app.get('/', (req, res) => {
 // Health check endpoint (public)
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+// API status endpoint for financial API demo
+app.get('/api/status', (req, res) => {
+  const apis = {
+    'ALPHA_VANTAGE_API_KEY': { configured: !!process.env.ALPHA_VANTAGE_API_KEY, rateLimit: '25/day' },
+    'FINNHUB_API_KEY': { configured: !!process.env.FINNHUB_API_KEY, rateLimit: '60/min' },
+    'TWELVE_DATA_API_KEY': { configured: !!process.env.TWELVE_DATA_API_KEY, rateLimit: '800/day' },
+    'POLYGON_API_KEY': { configured: !!process.env.POLYGON_API_KEY, rateLimit: '5/min' },
+    'FMP_API_KEY': { configured: !!process.env.FMP_API_KEY, rateLimit: '250/day' },
+    'TIINGO_API_KEY': { configured: !!process.env.TIINGO_API_KEY, rateLimit: '50k/mo' },
+    'FRED_API_KEY': { configured: !!process.env.FRED_API_KEY, rateLimit: 'unlimited' },
+    'EXCHANGERATE_API_KEY': { configured: !!process.env.EXCHANGERATE_API_KEY, rateLimit: '1500/mo' },
+    'NEWS_API_KEY': { configured: !!process.env.NEWS_API_KEY, rateLimit: '100/day' },
+    'MARKETSTACK_API_KEY': { configured: !!process.env.MARKETSTACK_API_KEY, rateLimit: '100/mo' },
+    'NASDAQ_DATA_LINK_API_KEY': { configured: !!process.env.NASDAQ_DATA_LINK_API_KEY, rateLimit: '50/day' },
+  };
+  res.json({
+    status: 'ok',
+    redis: redisCache ? 'connected' : 'not configured',
+    apis
+  });
 });
 
 // Initialize Clerk middleware - this adds auth info to all requests
@@ -444,6 +469,103 @@ app.get('/api/graham/history/:symbol', requireAuth(), async (req, res) => {
   }
 });
 
+// ============ Graham Number Comparison Endpoint ============
+// Compares Graham Number calculation across multiple data sources
+
+app.get('/api/graham/compare/:symbol', requireAuth(), async (req, res) => {
+  const { symbol } = req.params;
+
+  const calculate = (eps, bvps) => {
+    if (!eps || !bvps || eps <= 0 || bvps <= 0) return null;
+    return parseFloat(Math.sqrt(22.5 * eps * bvps).toFixed(2));
+  };
+
+  const results = { symbol, strategies: {} };
+
+  // Get current price from Yahoo (free, no key needed)
+  try {
+    const priceData = await yahooFinance.getQuote(symbol);
+    results.price = priceData.regularMarketPrice;
+  } catch (e) {
+    results.price = null;
+  }
+
+  // Strategy 1: Finnhub
+  try {
+    if (finnhubClient) {
+      const data = await finnhubClient.getBasicFinancials(symbol);
+      const m = data.metric || {};
+      const eps = m.epsAnnual;
+      const bvps = m.bookValuePerShareAnnual;
+      results.strategies.finnhub = { eps, bvps, graham: calculate(eps, bvps), error: null };
+    } else {
+      results.strategies.finnhub = { eps: null, bvps: null, graham: null, error: 'Not configured' };
+    }
+  } catch (e) {
+    results.strategies.finnhub = { eps: null, bvps: null, graham: null, error: e.message };
+  }
+
+  // Strategy 2: FMP
+  try {
+    const apiKey = process.env.FMP_API_KEY;
+    if (apiKey) {
+      const resp = await axios.get(`https://financialmodelingprep.com/api/v3/key-metrics-ttm/${symbol}?apikey=${apiKey}`);
+      const d = resp.data[0] || {};
+      const eps = d.netIncomePerShareTTM;
+      const bvps = d.bookValuePerShareTTM;
+      results.strategies.fmp = { eps, bvps, graham: calculate(eps, bvps), error: null };
+    } else {
+      results.strategies.fmp = { eps: null, bvps: null, graham: null, error: 'Not configured' };
+    }
+  } catch (e) {
+    results.strategies.fmp = { eps: null, bvps: null, graham: null, error: e.message };
+  }
+
+  // Strategy 3: Polygon
+  try {
+    const apiKey = process.env.POLYGON_API_KEY;
+    if (apiKey) {
+      const resp = await axios.get(`https://api.polygon.io/vX/reference/financials?ticker=${symbol}&limit=1&apiKey=${apiKey}`);
+      const fin = resp.data.results?.[0]?.financials || {};
+      const income = fin.income_statement || {};
+      const balance = fin.balance_sheet || {};
+      const eps = income.diluted_earnings_per_share?.value;
+      const equity = balance.equity?.value;
+      const shares = income.basic_average_shares?.value;
+      const bvps = (equity && shares) ? equity / shares : null;
+      results.strategies.polygon = { eps, bvps: bvps ? parseFloat(bvps.toFixed(2)) : null, graham: calculate(eps, bvps), error: null };
+    } else {
+      results.strategies.polygon = { eps: null, bvps: null, graham: null, error: 'Not configured' };
+    }
+  } catch (e) {
+    results.strategies.polygon = { eps: null, bvps: null, graham: null, error: e.message };
+  }
+
+  // Strategy 4: Twelve Data
+  try {
+    const apiKey = process.env.TWELVE_DATA_API_KEY;
+    if (apiKey) {
+      const [statsResp, balanceResp] = await Promise.all([
+        axios.get(`https://api.twelvedata.com/statistics?symbol=${symbol}&apikey=${apiKey}`),
+        axios.get(`https://api.twelvedata.com/balance_sheet?symbol=${symbol}&apikey=${apiKey}`)
+      ]);
+      const stats = statsResp.data.statistics?.valuations_metrics || {};
+      const balance = balanceResp.data.balance_sheet?.[0] || {};
+      const eps = stats.trailing_pe && results.price ? results.price / stats.trailing_pe : null;
+      const equity = parseFloat(balance.total_shareholder_equity);
+      const shares = parseFloat(balance.common_stock_shares_outstanding);
+      const bvps = (equity && shares) ? equity / shares : null;
+      results.strategies.twelvedata = { eps: eps ? parseFloat(eps.toFixed(2)) : null, bvps: bvps ? parseFloat(bvps.toFixed(2)) : null, graham: calculate(eps, bvps), error: null };
+    } else {
+      results.strategies.twelvedata = { eps: null, bvps: null, graham: null, error: 'Not configured' };
+    }
+  } catch (e) {
+    results.strategies.twelvedata = { eps: null, bvps: null, graham: null, error: e.message };
+  }
+
+  res.json(results);
+});
+
 // Revenue history endpoint
 // Returns salesRevenue: Revenue from Contracts with Customers (ASC 606)
 app.get('/api/revenue/history/:symbol', requireAuth(), async (req, res) => {
@@ -503,6 +625,350 @@ app.get('/api/yahoo/quote/:symbol', requireAuth(), async (req, res) => {
       error: 'Failed to fetch quote',
       details: error.message
     });
+  }
+});
+
+// ============ Alpha Vantage API Endpoints ============
+
+const axios = require('axios');
+
+// Alpha Vantage quote
+app.get('/api/alphavantage/quote/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Alpha Vantage not configured', details: 'ALPHA_VANTAGE_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  try {
+    const response = await axios.get(`https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${apiKey}`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Alpha Vantage request failed', details: error.message });
+  }
+});
+
+// Alpha Vantage time series
+app.get('/api/alphavantage/timeseries/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Alpha Vantage not configured', details: 'ALPHA_VANTAGE_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  const { interval } = req.query;
+  try {
+    const func = interval ? 'TIME_SERIES_INTRADAY' : 'TIME_SERIES_DAILY';
+    let url = `https://www.alphavantage.co/query?function=${func}&symbol=${symbol}&apikey=${apiKey}`;
+    if (interval) url += `&interval=${interval}`;
+    const response = await axios.get(url);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Alpha Vantage request failed', details: error.message });
+  }
+});
+
+// ============ Twelve Data API Endpoints ============
+
+// Twelve Data quote
+app.get('/api/twelvedata/quote/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.TWELVE_DATA_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Twelve Data not configured', details: 'TWELVE_DATA_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  try {
+    const response = await axios.get(`https://api.twelvedata.com/quote?symbol=${symbol}&apikey=${apiKey}`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Twelve Data request failed', details: error.message });
+  }
+});
+
+// Twelve Data time series
+app.get('/api/twelvedata/timeseries/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.TWELVE_DATA_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Twelve Data not configured', details: 'TWELVE_DATA_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  const { interval, outputsize } = req.query;
+  try {
+    const response = await axios.get(`https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval || '1day'}&outputsize=${outputsize || 30}&apikey=${apiKey}`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Twelve Data request failed', details: error.message });
+  }
+});
+
+// ============ Polygon.io API Endpoints ============
+
+// Polygon quote (using existing client)
+app.get('/api/polygon/quote/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.POLYGON_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Polygon not configured', details: 'POLYGON_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  try {
+    const response = await axios.get(`https://api.polygon.io/v2/aggs/ticker/${symbol}/prev?apiKey=${apiKey}`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Polygon request failed', details: error.message });
+  }
+});
+
+// Polygon ticker details
+app.get('/api/polygon/details/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.POLYGON_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Polygon not configured', details: 'POLYGON_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  try {
+    const response = await axios.get(`https://api.polygon.io/v3/reference/tickers/${symbol}?apiKey=${apiKey}`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Polygon request failed', details: error.message });
+  }
+});
+
+// ============ Financial Modeling Prep (FMP) API Endpoints ============
+
+// FMP quote
+app.get('/api/fmp/quote/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.FMP_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'FMP not configured', details: 'FMP_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  try {
+    const response = await axios.get(`https://financialmodelingprep.com/api/v3/quote/${symbol}?apikey=${apiKey}`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'FMP request failed', details: error.message });
+  }
+});
+
+// FMP profile
+app.get('/api/fmp/profile/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.FMP_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'FMP not configured', details: 'FMP_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  try {
+    const response = await axios.get(`https://financialmodelingprep.com/api/v3/profile/${symbol}?apikey=${apiKey}`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'FMP request failed', details: error.message });
+  }
+});
+
+// ============ Tiingo API Endpoints ============
+
+// Tiingo quote
+app.get('/api/tiingo/quote/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.TIINGO_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Tiingo not configured', details: 'TIINGO_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  try {
+    const response = await axios.get(`https://api.tiingo.com/iex/${symbol}`, {
+      headers: { 'Authorization': `Token ${apiKey}` }
+    });
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Tiingo request failed', details: error.message });
+  }
+});
+
+// Tiingo meta (company info)
+app.get('/api/tiingo/meta/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.TIINGO_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Tiingo not configured', details: 'TIINGO_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  try {
+    const response = await axios.get(`https://api.tiingo.com/tiingo/daily/${symbol}`, {
+      headers: { 'Authorization': `Token ${apiKey}` }
+    });
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Tiingo request failed', details: error.message });
+  }
+});
+
+// ============ FRED API Endpoints ============
+
+// FRED series data
+app.get('/api/fred/series/:seriesId', requireAuth(), async (req, res) => {
+  const apiKey = process.env.FRED_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'FRED not configured', details: 'FRED_API_KEY not set' });
+  }
+  const { seriesId } = req.params;
+  const { limit } = req.query;
+  try {
+    const response = await axios.get(`https://api.stlouisfed.org/fred/series/observations?series_id=${seriesId}&api_key=${apiKey}&file_type=json&limit=${limit || 100}&sort_order=desc`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'FRED request failed', details: error.message });
+  }
+});
+
+// FRED series search
+app.get('/api/fred/search', requireAuth(), async (req, res) => {
+  const apiKey = process.env.FRED_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'FRED not configured', details: 'FRED_API_KEY not set' });
+  }
+  const { q } = req.query;
+  if (!q) {
+    return res.status(400).json({ error: 'Missing required parameter: q' });
+  }
+  try {
+    const response = await axios.get(`https://api.stlouisfed.org/fred/series/search?search_text=${encodeURIComponent(q)}&api_key=${apiKey}&file_type=json&limit=10`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'FRED request failed', details: error.message });
+  }
+});
+
+// ============ ExchangeRate-API Endpoints ============
+
+// Exchange rate latest
+app.get('/api/exchangerate/latest/:base', requireAuth(), async (req, res) => {
+  const apiKey = process.env.EXCHANGERATE_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'ExchangeRate-API not configured', details: 'EXCHANGERATE_API_KEY not set' });
+  }
+  const { base } = req.params;
+  try {
+    const response = await axios.get(`https://v6.exchangerate-api.com/v6/${apiKey}/latest/${base}`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'ExchangeRate-API request failed', details: error.message });
+  }
+});
+
+// Exchange rate pair
+app.get('/api/exchangerate/pair/:base/:target', requireAuth(), async (req, res) => {
+  const apiKey = process.env.EXCHANGERATE_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'ExchangeRate-API not configured', details: 'EXCHANGERATE_API_KEY not set' });
+  }
+  const { base, target } = req.params;
+  try {
+    const response = await axios.get(`https://v6.exchangerate-api.com/v6/${apiKey}/pair/${base}/${target}`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'ExchangeRate-API request failed', details: error.message });
+  }
+});
+
+// ============ NewsAPI Endpoints ============
+
+// NewsAPI top headlines
+app.get('/api/newsapi/headlines', requireAuth(), async (req, res) => {
+  const apiKey = process.env.NEWS_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'NewsAPI not configured', details: 'NEWS_API_KEY not set' });
+  }
+  const { category, country, q } = req.query;
+  try {
+    let url = `https://newsapi.org/v2/top-headlines?apiKey=${apiKey}`;
+    if (category) url += `&category=${category}`;
+    if (country) url += `&country=${country}`;
+    else url += '&country=us';
+    if (q) url += `&q=${encodeURIComponent(q)}`;
+    const response = await axios.get(url);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'NewsAPI request failed', details: error.message });
+  }
+});
+
+// NewsAPI business news
+app.get('/api/newsapi/business', requireAuth(), async (req, res) => {
+  const apiKey = process.env.NEWS_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'NewsAPI not configured', details: 'NEWS_API_KEY not set' });
+  }
+  try {
+    const response = await axios.get(`https://newsapi.org/v2/top-headlines?apiKey=${apiKey}&category=business&country=us`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'NewsAPI request failed', details: error.message });
+  }
+});
+
+// ============ Marketstack API Endpoints ============
+
+// Marketstack end-of-day data
+app.get('/api/marketstack/eod/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.MARKETSTACK_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Marketstack not configured', details: 'MARKETSTACK_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  const { limit } = req.query;
+  try {
+    const response = await axios.get(`http://api.marketstack.com/v1/eod?access_key=${apiKey}&symbols=${symbol}&limit=${limit || 10}`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Marketstack request failed', details: error.message });
+  }
+});
+
+// Marketstack intraday
+app.get('/api/marketstack/intraday/:symbol', requireAuth(), async (req, res) => {
+  const apiKey = process.env.MARKETSTACK_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Marketstack not configured', details: 'MARKETSTACK_API_KEY not set' });
+  }
+  const { symbol } = req.params;
+  try {
+    const response = await axios.get(`http://api.marketstack.com/v1/intraday?access_key=${apiKey}&symbols=${symbol}&limit=10`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Marketstack request failed', details: error.message });
+  }
+});
+
+// ============ Nasdaq Data Link API Endpoints ============
+
+// Nasdaq Data Link dataset
+app.get('/api/nasdaq/data/:database/:dataset', requireAuth(), async (req, res) => {
+  const apiKey = process.env.NASDAQ_DATA_LINK_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Nasdaq Data Link not configured', details: 'NASDAQ_DATA_LINK_API_KEY not set' });
+  }
+  const { database, dataset } = req.params;
+  const { limit } = req.query;
+  try {
+    const response = await axios.get(`https://data.nasdaq.com/api/v3/datasets/${database}/${dataset}.json?api_key=${apiKey}&limit=${limit || 10}`);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Nasdaq Data Link request failed', details: error.message });
+  }
+});
+
+// Nasdaq Data Link tables (e.g., SHARADAR for fundamentals)
+app.get('/api/nasdaq/tables/:vendor/:table', requireAuth(), async (req, res) => {
+  const apiKey = process.env.NASDAQ_DATA_LINK_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Nasdaq Data Link not configured', details: 'NASDAQ_DATA_LINK_API_KEY not set' });
+  }
+  const { vendor, table } = req.params;
+  const { ticker } = req.query;
+  try {
+    let url = `https://data.nasdaq.com/api/v3/datatables/${vendor}/${table}.json?api_key=${apiKey}`;
+    if (ticker) url += `&ticker=${ticker}`;
+    const response = await axios.get(url);
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Nasdaq Data Link request failed', details: error.message });
   }
 });
 
@@ -739,6 +1205,7 @@ app.get('/api/admin/stats', requireAuth(), async (req, res) => {
       plan: user.privateMetadata?.waitlist?.plan || null,
       isAdmin: user.privateMetadata?.isAdmin === true,
       hasTradingAccess: user.privateMetadata?.hasTradingAccess === true,
+      hasRetailApiAccess: user.privateMetadata?.hasRetailApiAccess === true,
     }));
 
     // Format Alpaca accounts
@@ -871,6 +1338,701 @@ app.post('/api/admin/users/:targetUserId/trading', requireAuth(), requireAdmin()
   } catch (error) {
     console.error('Failed to update trading access:', error);
     res.status(500).json({ error: 'Failed to update trading access', details: error.message });
+  }
+});
+
+// Toggle retail API access for a user (admin only)
+app.post('/api/admin/users/:targetUserId/retail-api-access', requireAuth(), requireAdmin(), async (req, res) => {
+  try {
+    const { targetUserId } = req.params;
+    const { hasRetailApiAccess } = req.body;
+
+    const user = await clerkClient.users.getUser(targetUserId);
+    const existingMetadata = user.privateMetadata || {};
+
+    await clerkClient.users.updateUserMetadata(targetUserId, {
+      privateMetadata: {
+        ...existingMetadata,
+        hasRetailApiAccess: hasRetailApiAccess === true,
+      }
+    });
+
+    res.json({ success: true, hasRetailApiAccess: hasRetailApiAccess === true });
+  } catch (error) {
+    console.error('Failed to update retail API access:', error);
+    res.status(500).json({ error: 'Failed to update retail API access', details: error.message });
+  }
+});
+
+// Get all deletion requests (admin only)
+app.get('/api/admin/deletion-requests', requireAuth(), requireAdmin(), async (req, res) => {
+  try {
+    const users = await clerkClient.users.getUserList({ limit: 500 });
+    const requests = users.data
+      .filter(u => u.privateMetadata?.deletionRequest?.status === 'pending')
+      .map(u => ({
+        userId: u.id,
+        email: u.emailAddresses?.[0]?.emailAddress,
+        firstName: u.firstName,
+        lastName: u.lastName,
+        requestedAt: u.privateMetadata.deletionRequest.requestedAt,
+        reason: u.privateMetadata.deletionRequest.reason || null,
+      }));
+
+    res.json({ requests });
+  } catch (error) {
+    console.error('Failed to get deletion requests:', error);
+    res.status(500).json({ error: 'Failed to get deletion requests', details: error.message });
+  }
+});
+
+// Process deletion request (admin only)
+app.post('/api/admin/deletion-requests/:targetUserId/action', requireAuth(), requireAdmin(), async (req, res) => {
+  try {
+    const { targetUserId } = req.params;
+    const { action } = req.body; // 'approve' or 'deny'
+
+    if (!['approve', 'deny'].includes(action)) {
+      return res.status(400).json({ error: 'Invalid action. Must be "approve" or "deny".' });
+    }
+
+    const user = await clerkClient.users.getUser(targetUserId);
+    const existingMetadata = user.privateMetadata || {};
+
+    if (!existingMetadata.deletionRequest) {
+      return res.status(404).json({ error: 'No deletion request found for this user.' });
+    }
+
+    if (action === 'approve') {
+      // Delete the user from Clerk
+      await clerkClient.users.deleteUser(targetUserId);
+      res.json({ success: true, action: 'approved', message: 'User has been deleted.' });
+    } else {
+      // Deny the request - update status
+      await clerkClient.users.updateUserMetadata(targetUserId, {
+        privateMetadata: {
+          ...existingMetadata,
+          deletionRequest: {
+            ...existingMetadata.deletionRequest,
+            status: 'denied',
+            processedAt: new Date().toISOString(),
+          }
+        }
+      });
+      res.json({ success: true, action: 'denied', message: 'Deletion request has been denied.' });
+    }
+  } catch (error) {
+    console.error('Failed to process deletion request:', error);
+    res.status(500).json({ error: 'Failed to process deletion request', details: error.message });
+  }
+});
+
+// ============ User Settings Endpoints ============
+
+// Get current user's settings and permissions
+app.get('/api/user/settings', requireAuth(), async (req, res) => {
+  try {
+    const { userId } = getAuth(req);
+    const user = await clerkClient.users.getUser(userId);
+
+    res.json({
+      id: user.id,
+      email: user.emailAddresses?.[0]?.emailAddress,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      hasRetailApiAccess: user.privateMetadata?.hasRetailApiAccess === true,
+      hasTradingAccess: user.privateMetadata?.hasTradingAccess === true,
+      deletionRequest: user.privateMetadata?.deletionRequest || null,
+    });
+  } catch (error) {
+    console.error('Failed to get user settings:', error);
+    res.status(500).json({ error: 'Failed to get user settings', details: error.message });
+  }
+});
+
+// Request account deletion
+app.post('/api/user/request-deletion', requireAuth(), async (req, res) => {
+  try {
+    const { userId } = getAuth(req);
+    const { reason } = req.body;
+
+    const user = await clerkClient.users.getUser(userId);
+    const existingMetadata = user.privateMetadata || {};
+
+    // Check if there's already a pending request
+    if (existingMetadata.deletionRequest?.status === 'pending') {
+      return res.status(400).json({ error: 'You already have a pending deletion request.' });
+    }
+
+    await clerkClient.users.updateUserMetadata(userId, {
+      privateMetadata: {
+        ...existingMetadata,
+        deletionRequest: {
+          requestedAt: new Date().toISOString(),
+          reason: reason || null,
+          status: 'pending',
+        }
+      }
+    });
+
+    res.json({ success: true, message: 'Deletion request submitted successfully.' });
+  } catch (error) {
+    console.error('Failed to submit deletion request:', error);
+    res.status(500).json({ error: 'Failed to submit deletion request', details: error.message });
+  }
+});
+
+// Cancel deletion request
+app.delete('/api/user/request-deletion', requireAuth(), async (req, res) => {
+  try {
+    const { userId } = getAuth(req);
+
+    const user = await clerkClient.users.getUser(userId);
+    const existingMetadata = user.privateMetadata || {};
+
+    if (!existingMetadata.deletionRequest || existingMetadata.deletionRequest.status !== 'pending') {
+      return res.status(400).json({ error: 'No pending deletion request to cancel.' });
+    }
+
+    const { deletionRequest, ...restMetadata } = existingMetadata;
+
+    await clerkClient.users.updateUserMetadata(userId, {
+      privateMetadata: restMetadata
+    });
+
+    res.json({ success: true, message: 'Deletion request cancelled.' });
+  } catch (error) {
+    console.error('Failed to cancel deletion request:', error);
+    res.status(500).json({ error: 'Failed to cancel deletion request', details: error.message });
+  }
+});
+
+// ============ User API Key Endpoints ============
+// These endpoints allow users to store their personal Alpaca retail API keys in Clerk metadata
+
+// Enable retail API access for current user (self-service for development)
+app.post('/api/user/enable-retail-api', requireAuth(), async (req, res) => {
+  try {
+    const { userId } = getAuth(req);
+    const user = await clerkClient.users.getUser(userId);
+    const existingMetadata = user.privateMetadata || {};
+
+    await clerkClient.users.updateUserMetadata(userId, {
+      privateMetadata: {
+        ...existingMetadata,
+        hasRetailApiAccess: true,
+      }
+    });
+
+    res.json({ success: true, message: 'Retail API access enabled.' });
+  } catch (error) {
+    console.error('Failed to enable retail API access:', error);
+    res.status(500).json({ error: 'Failed to enable retail API access', details: error.message });
+  }
+});
+
+// List user's stored API keys
+app.get('/api/user/api-keys', requireAuth(), async (req, res) => {
+  try {
+    const { userId } = getAuth(req);
+    const user = await clerkClient.users.getUser(userId);
+
+    // Check if user has retail API access
+    if (!user.privateMetadata?.hasRetailApiAccess) {
+      return res.status(403).json({ error: 'You do not have retail API access.' });
+    }
+
+    // Get stored API keys from Clerk metadata (secrets are masked)
+    const storedKeys = user.privateMetadata?.retailApiKeys || [];
+
+    // Return keys with masked secrets
+    const keys = storedKeys.map(key => ({
+      id: key.id,
+      name: key.name,
+      apiKeyId: key.apiKeyId,
+      secretLastFour: key.secretLastFour,
+      createdAt: key.createdAt,
+    }));
+
+    res.json({ keys });
+  } catch (error) {
+    console.error('Failed to list API keys:', error);
+    res.status(500).json({ error: 'Failed to list API keys', details: error.message });
+  }
+});
+
+// Get all individual accounts with Alpaca account info
+app.get('/api/user/individual-accounts', requireAuth(), async (req, res) => {
+  try {
+    const { userId } = getAuth(req);
+    const user = await clerkClient.users.getUser(userId);
+    console.log('[individual-accounts] Fetching accounts for user:', userId);
+
+    // Check if user has retail API access
+    if (!user.privateMetadata?.hasRetailApiAccess) {
+      console.log('[individual-accounts] User does not have retail API access');
+      return res.status(403).json({ error: 'Retail API access not enabled' });
+    }
+
+    const storedKeys = user.privateMetadata?.retailApiKeys || [];
+    console.log('[individual-accounts] Found', storedKeys.length, 'stored keys');
+    if (storedKeys.length === 0) {
+      return res.json({ accounts: [] });
+    }
+
+    // Fetch account info for each stored key
+    const accounts = await Promise.all(
+      storedKeys.map(async (key) => {
+        console.log('[individual-accounts] Fetching account for key:', key.apiKeyId);
+        try {
+          // Decrypt the API secret if encryption is configured
+          let apiSecret = key.apiSecret;
+          if (isEncryptionConfigured() && apiSecret) {
+            try {
+              apiSecret = decrypt(apiSecret);
+              console.log('[individual-accounts] Decrypted secret successfully');
+            } catch (e) {
+              console.log('[individual-accounts] Using unencrypted secret (decryption failed)');
+              // If decryption fails, assume it's not encrypted (legacy data)
+            }
+          }
+
+          const client = new IndividualAlpacaClient(key.apiKeyId, apiSecret, true);
+          const account = await client.getAccount();
+          console.log('[individual-accounts] Got account:', account.account_number, account.status);
+
+          return {
+            keyId: key.id,
+            name: key.name,
+            apiKeyId: key.apiKeyId,
+            accountNumber: account.account_number,
+            status: account.status,
+            portfolioValue: account.portfolio_value,
+            cash: account.cash,
+            buyingPower: account.buying_power,
+          };
+        } catch (error) {
+          console.error('[individual-accounts] Error fetching account for key:', key.apiKeyId, error.message);
+          // Return error info for this key but don't fail the whole request
+          return {
+            keyId: key.id,
+            name: key.name,
+            apiKeyId: key.apiKeyId,
+            error: error.message || 'Failed to fetch account',
+          };
+        }
+      })
+    );
+
+    // Return active key ID from metadata
+    const activeKeyId = user.privateMetadata?.activeRetailKeyId || (storedKeys[0]?.id || null);
+    console.log('[individual-accounts] Returning', accounts.length, 'accounts, activeKeyId:', activeKeyId);
+
+    res.json({ accounts, activeKeyId });
+  } catch (error) {
+    console.error('Failed to get individual accounts:', error);
+    res.status(500).json({ error: 'Failed to get individual accounts', details: error.message });
+  }
+});
+
+// Set active retail API key
+app.post('/api/user/set-active-key', requireAuth(), async (req, res) => {
+  try {
+    const { userId } = getAuth(req);
+    const { keyId } = req.body;
+
+    if (!keyId) {
+      return res.status(400).json({ error: 'keyId is required' });
+    }
+
+    const user = await clerkClient.users.getUser(userId);
+
+    // Check if user has retail API access
+    if (!user.privateMetadata?.hasRetailApiAccess) {
+      return res.status(403).json({ error: 'Retail API access not enabled' });
+    }
+
+    const storedKeys = user.privateMetadata?.retailApiKeys || [];
+
+    // Verify the keyId exists
+    if (!storedKeys.some(k => k.id === keyId)) {
+      return res.status(400).json({ error: 'Invalid key ID' });
+    }
+
+    // Update active key in metadata
+    await clerkClient.users.updateUserMetadata(userId, {
+      privateMetadata: {
+        ...user.privateMetadata,
+        activeRetailKeyId: keyId,
+      }
+    });
+
+    res.json({ success: true, activeKeyId: keyId });
+  } catch (error) {
+    console.error('Failed to set active key:', error);
+    res.status(500).json({ error: 'Failed to set active key', details: error.message });
+  }
+});
+
+// Add a new API key (user provides their own Alpaca retail API credentials)
+app.post('/api/user/api-keys', requireAuth(), async (req, res) => {
+  try {
+    const { userId } = getAuth(req);
+    const { name, apiKeyId, apiSecret } = req.body;
+
+    if (!apiKeyId || !apiSecret) {
+      return res.status(400).json({ error: 'API Key ID and Secret are required.' });
+    }
+
+    const user = await clerkClient.users.getUser(userId);
+
+    // Check if user has retail API access
+    if (!user.privateMetadata?.hasRetailApiAccess) {
+      return res.status(403).json({ error: 'You do not have retail API access.' });
+    }
+
+    const existingMetadata = user.privateMetadata || {};
+    const existingKeys = existingMetadata.retailApiKeys || [];
+
+    // Check for duplicate API Key ID
+    if (existingKeys.some(k => k.apiKeyId === apiKeyId)) {
+      return res.status(400).json({ error: 'This API Key ID is already stored.' });
+    }
+
+    // Create new key entry
+    const newKey = {
+      id: `key_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+      name: name || 'Alpaca API Key',
+      apiKeyId: apiKeyId,
+      apiSecret: apiSecret, // Stored securely in Clerk's private metadata
+      secretLastFour: apiSecret.slice(-4),
+      createdAt: new Date().toISOString(),
+    };
+
+    // Add to metadata
+    await clerkClient.users.updateUserMetadata(userId, {
+      privateMetadata: {
+        ...existingMetadata,
+        retailApiKeys: [...existingKeys, newKey],
+      }
+    });
+
+    res.json({
+      success: true,
+      key: {
+        id: newKey.id,
+        name: newKey.name,
+        apiKeyId: newKey.apiKeyId,
+        secretLastFour: newKey.secretLastFour,
+        createdAt: newKey.createdAt,
+      }
+    });
+  } catch (error) {
+    console.error('Failed to add API key:', error);
+    res.status(500).json({ error: 'Failed to add API key', details: error.message });
+  }
+});
+
+// Delete stored API key
+app.delete('/api/user/api-keys/:keyId', requireAuth(), async (req, res) => {
+  try {
+    const { userId } = getAuth(req);
+    const { keyId } = req.params;
+    const user = await clerkClient.users.getUser(userId);
+
+    // Check if user has retail API access
+    if (!user.privateMetadata?.hasRetailApiAccess) {
+      return res.status(403).json({ error: 'You do not have retail API access.' });
+    }
+
+    const existingMetadata = user.privateMetadata || {};
+    const existingKeys = existingMetadata.retailApiKeys || [];
+
+    // Find and remove the key
+    const keyIndex = existingKeys.findIndex(k => k.id === keyId);
+    if (keyIndex === -1) {
+      return res.status(404).json({ error: 'API key not found.' });
+    }
+
+    const updatedKeys = existingKeys.filter(k => k.id !== keyId);
+
+    await clerkClient.users.updateUserMetadata(userId, {
+      privateMetadata: {
+        ...existingMetadata,
+        retailApiKeys: updatedKeys,
+      }
+    });
+
+    res.json({ success: true, message: 'API key deleted successfully.' });
+  } catch (error) {
+    console.error('Failed to delete API key:', error);
+    res.status(500).json({ error: 'Failed to delete API key', details: error.message });
+  }
+});
+
+// ============ Individual Account Endpoints (uses user's retail API keys) ============
+
+// Helper function to get user's individual Alpaca client
+async function getIndividualClient(userId) {
+  const user = await clerkClient.users.getUser(userId);
+  const privateMetadata = user.privateMetadata || {};
+
+  if (!privateMetadata.hasRetailApiAccess) {
+    throw new Error('Retail API access not enabled');
+  }
+
+  const retailApiKeys = privateMetadata.retailApiKeys || [];
+  if (retailApiKeys.length === 0) {
+    throw new Error('No API keys configured');
+  }
+
+  // Use the active key from metadata, or fall back to first key
+  const activeKeyId = privateMetadata.activeRetailKeyId;
+  let activeKey = retailApiKeys[0]; // Default to first key
+
+  if (activeKeyId) {
+    const found = retailApiKeys.find(k => k.id === activeKeyId);
+    if (found) {
+      activeKey = found;
+    }
+  }
+
+  // Decrypt the API secret if encryption is configured
+  let apiSecret = activeKey.apiSecret;
+  if (isEncryptionConfigured() && apiSecret) {
+    try {
+      apiSecret = decrypt(apiSecret);
+    } catch (e) {
+      // If decryption fails, assume it's not encrypted (legacy data)
+      console.log('Using unencrypted API secret');
+    }
+  }
+
+  return new IndividualAlpacaClient(activeKey.apiKeyId, apiSecret, true);
+}
+
+// Get individual account info
+app.get('/api/individual/account', requireAuth(), async (req, res) => {
+  const { userId } = getAuth(req);
+
+  try {
+    const client = await getIndividualClient(userId);
+    const account = await client.getAccount();
+
+    res.json({
+      id: account.id,
+      accountNumber: account.account_number,
+      status: account.status,
+      currency: account.currency,
+      cashBalance: account.cash,
+      portfolioValue: account.portfolio_value,
+      buyingPower: account.buying_power,
+      equity: account.equity,
+      lastEquity: account.last_equity,
+      longMarketValue: account.long_market_value,
+      shortMarketValue: account.short_market_value,
+      daytradeCount: account.daytrade_count,
+      patternDayTrader: account.pattern_day_trader,
+      tradingBlocked: account.trading_blocked,
+      transfersBlocked: account.transfers_blocked,
+      accountBlocked: account.account_blocked,
+      createdAt: account.created_at,
+    });
+  } catch (error) {
+    console.error('Failed to get individual account:', error);
+    if (error.message === 'Retail API access not enabled' || error.message === 'No API keys configured') {
+      return res.status(403).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Failed to get account', details: error.message });
+  }
+});
+
+// Get individual positions
+app.get('/api/individual/positions', requireAuth(), async (req, res) => {
+  const { userId } = getAuth(req);
+
+  try {
+    const client = await getIndividualClient(userId);
+    const positions = await client.getPositions();
+
+    res.json(positions.map(p => ({
+      assetId: p.asset_id,
+      symbol: p.symbol,
+      exchange: p.exchange,
+      assetClass: p.asset_class,
+      qty: p.qty,
+      avgEntryPrice: p.avg_entry_price,
+      side: p.side,
+      marketValue: p.market_value,
+      costBasis: p.cost_basis,
+      unrealizedPL: p.unrealized_pl,
+      unrealizedPLPercent: p.unrealized_plpc,
+      currentPrice: p.current_price,
+      lastdayPrice: p.lastday_price,
+      changeToday: p.change_today,
+    })));
+  } catch (error) {
+    console.error('Failed to get individual positions:', error);
+    if (error.message === 'Retail API access not enabled' || error.message === 'No API keys configured') {
+      return res.status(403).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Failed to get positions', details: error.message });
+  }
+});
+
+// Get individual orders
+app.get('/api/individual/orders', requireAuth(), async (req, res) => {
+  const { userId } = getAuth(req);
+  const status = req.query.status || 'all';
+  const limit = parseInt(req.query.limit) || 100;
+
+  try {
+    const client = await getIndividualClient(userId);
+    const orders = await client.getOrders(status, limit);
+
+    res.json(orders.map(o => ({
+      id: o.id,
+      clientOrderId: o.client_order_id,
+      symbol: o.symbol,
+      assetClass: o.asset_class,
+      qty: o.qty,
+      filledQty: o.filled_qty,
+      side: o.side,
+      type: o.type,
+      timeInForce: o.time_in_force,
+      limitPrice: o.limit_price,
+      stopPrice: o.stop_price,
+      filledAvgPrice: o.filled_avg_price,
+      status: o.status,
+      createdAt: o.created_at,
+      updatedAt: o.updated_at,
+      submittedAt: o.submitted_at,
+      filledAt: o.filled_at,
+      canceledAt: o.canceled_at,
+      expiredAt: o.expired_at,
+    })));
+  } catch (error) {
+    console.error('Failed to get individual orders:', error);
+    if (error.message === 'Retail API access not enabled' || error.message === 'No API keys configured') {
+      return res.status(403).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Failed to get orders', details: error.message });
+  }
+});
+
+// Place order on individual account
+app.post('/api/individual/orders', requireAuth(), async (req, res) => {
+  const { userId } = getAuth(req);
+  const { symbol, qty, side, type, time_in_force, limit_price, stop_price, notional } = req.body;
+
+  if (!symbol || !side || !type) {
+    return res.status(400).json({ error: 'Missing required fields: symbol, side, type' });
+  }
+
+  if (!qty && !notional) {
+    return res.status(400).json({ error: 'Must specify either qty or notional' });
+  }
+
+  try {
+    const client = await getIndividualClient(userId);
+
+    const orderData = {
+      symbol: symbol.toUpperCase(),
+      side, // 'buy' or 'sell'
+      type, // 'market', 'limit', 'stop', 'stop_limit'
+      time_in_force: time_in_force || 'day',
+    };
+
+    if (qty) orderData.qty = String(qty);
+    if (notional) orderData.notional = String(notional);
+    if (limit_price) orderData.limit_price = String(limit_price);
+    if (stop_price) orderData.stop_price = String(stop_price);
+
+    const order = await client.placeOrder(orderData);
+
+    res.json({
+      id: order.id,
+      clientOrderId: order.client_order_id,
+      symbol: order.symbol,
+      qty: order.qty,
+      side: order.side,
+      type: order.type,
+      timeInForce: order.time_in_force,
+      limitPrice: order.limit_price,
+      stopPrice: order.stop_price,
+      status: order.status,
+      createdAt: order.created_at,
+      submittedAt: order.submitted_at,
+    });
+  } catch (error) {
+    console.error('Failed to place order:', error);
+    if (error.message === 'Retail API access not enabled' || error.message === 'No API keys configured') {
+      return res.status(403).json({ error: error.message });
+    }
+    // Return Alpaca's error message if available
+    const alpacaError = error.response?.data;
+    if (alpacaError) {
+      return res.status(400).json({ error: alpacaError.message || 'Order failed', details: alpacaError });
+    }
+    res.status(500).json({ error: 'Failed to place order', details: error.message });
+  }
+});
+
+// Cancel order on individual account
+app.delete('/api/individual/orders/:orderId', requireAuth(), async (req, res) => {
+  const { userId } = getAuth(req);
+  const { orderId } = req.params;
+
+  try {
+    const client = await getIndividualClient(userId);
+    await client.cancelOrder(orderId);
+
+    res.json({ success: true, message: 'Order canceled' });
+  } catch (error) {
+    console.error('Failed to cancel order:', error);
+    if (error.message === 'Retail API access not enabled' || error.message === 'No API keys configured') {
+      return res.status(403).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Failed to cancel order', details: error.message });
+  }
+});
+
+// Get individual portfolio history
+app.get('/api/individual/portfolio/history', requireAuth(), async (req, res) => {
+  const { userId } = getAuth(req);
+  const period = req.query.period || '1M';
+  const timeframe = req.query.timeframe || '1D';
+
+  try {
+    const client = await getIndividualClient(userId);
+    const history = await client.getPortfolioHistory(period, timeframe);
+
+    res.json(history);
+  } catch (error) {
+    console.error('Failed to get portfolio history:', error);
+    if (error.message === 'Retail API access not enabled' || error.message === 'No API keys configured') {
+      return res.status(403).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Failed to get portfolio history', details: error.message });
+  }
+});
+
+// Get individual account activities (cash events, dividends, etc.)
+app.get('/api/individual/activities', requireAuth(), async (req, res) => {
+  const { userId } = getAuth(req);
+  const { activity_types, after, until } = req.query;
+
+  try {
+    const client = await getIndividualClient(userId);
+    const activities = await client.getActivities(activity_types, after, until);
+
+    res.json(activities);
+  } catch (error) {
+    console.error('Failed to get account activities:', error);
+    if (error.message === 'Retail API access not enabled' || error.message === 'No API keys configured') {
+      return res.status(403).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Failed to get account activities', details: error.message });
   }
 });
 
@@ -1940,6 +3102,101 @@ app.delete('/api/stripe/customers/:customerId', requireAuth(), requireAdmin(), a
   }
 });
 
+// Create an Alpaca broker account (admin only)
+app.post('/api/alpaca/accounts', requireAuth(), requireAdmin(), async (req, res) => {
+  if (!alpacaClient) {
+    return res.status(503).json({
+      error: 'Alpaca not available',
+      details: 'Alpaca client not configured'
+    });
+  }
+
+  const { contact, identity, disclosures, agreements } = req.body;
+
+  // Validate required fields
+  if (!contact?.email_address) {
+    return res.status(400).json({ error: 'Email address is required' });
+  }
+  if (!identity?.given_name || !identity?.family_name) {
+    return res.status(400).json({ error: 'First and last name are required' });
+  }
+  if (!identity?.date_of_birth) {
+    return res.status(400).json({ error: 'Date of birth is required' });
+  }
+  if (!identity?.country_of_tax_residence) {
+    return res.status(400).json({ error: 'Country of tax residence is required' });
+  }
+  if (!identity?.tax_id) {
+    return res.status(400).json({ error: 'Tax ID is required' });
+  }
+  if (!contact?.street_address || !contact?.city || !contact?.state || !contact?.postal_code) {
+    return res.status(400).json({ error: 'Complete address is required' });
+  }
+  if (!disclosures) {
+    return res.status(400).json({ error: 'Disclosures are required' });
+  }
+  if (!agreements || !agreements.length) {
+    return res.status(400).json({ error: 'Agreements are required' });
+  }
+
+  try {
+    const accountData = {
+      contact,
+      identity,
+      disclosures,
+      agreements,
+      enabled_assets: ['us_equity'],
+    };
+
+    const account = await alpacaClient.createAccount(accountData);
+
+    res.json({
+      success: true,
+      account: {
+        id: account.id,
+        accountNumber: account.account_number,
+        status: account.status,
+        email: account.contact?.email_address,
+        firstName: account.identity?.given_name,
+        lastName: account.identity?.family_name,
+        createdAt: account.created_at,
+      }
+    });
+  } catch (error) {
+    console.error('Create Alpaca account error:', error.response?.data || error.message);
+    res.status(500).json({
+      error: 'Failed to create Alpaca account',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// Get a single Alpaca account by ID (admin only)
+app.get('/api/alpaca/accounts/:accountId', requireAuth(), requireAdmin(), async (req, res) => {
+  if (!alpacaClient) {
+    return res.status(503).json({
+      error: 'Alpaca not available',
+      details: 'Alpaca client not configured'
+    });
+  }
+
+  const { accountId } = req.params;
+
+  try {
+    const account = await alpacaClient.getAccountById(accountId);
+    if (!account) {
+      return res.status(404).json({ error: 'Account not found' });
+    }
+    res.json({ account });
+  } catch (error) {
+    console.error('Get Alpaca account error:', error.response?.data || error.message);
+    res.status(500).json({
+      error: 'Failed to get Alpaca account',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
 // Update an Alpaca account (admin only)
 app.patch('/api/alpaca/accounts/:accountId', requireAuth(), requireAdmin(), async (req, res) => {
   if (!alpacaClient) {
@@ -1974,6 +3231,32 @@ app.patch('/api/alpaca/accounts/:accountId', requireAuth(), requireAdmin(), asyn
     res.status(500).json({
       error: 'Failed to update Alpaca account',
       details: error.response?.data || error.message
+    });
+  }
+});
+
+// Get users with onboarding data (for Alpaca account creation testing)
+app.get('/api/admin/users/with-onboarding', requireAuth(), requireAdmin(), async (req, res) => {
+  try {
+    const clerkUsers = await clerkClient.users.getUserList({ limit: 500 });
+    const users = (clerkUsers.data || [])
+      .filter(user => user.privateMetadata?.onboarding)
+      .map(user => ({
+        id: user.id,
+        email: user.emailAddresses?.[0]?.emailAddress || null,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        phone: user.phoneNumbers?.[0]?.phoneNumber || null,
+        onboarding: user.privateMetadata.onboarding,
+        hasCompletedOnboarding: !!user.privateMetadata.onboarding.completedAt,
+      }));
+
+    res.json({ users });
+  } catch (error) {
+    console.error('Failed to get users with onboarding:', error.message);
+    res.status(500).json({
+      error: 'Failed to get users with onboarding data',
+      details: error.message
     });
   }
 });
@@ -2032,6 +3315,8 @@ app.get('/api/admin/users/overview', requireAuth(), async (req, res) => {
           lastSignInAt: user.lastSignInAt,
           isAdmin: user.privateMetadata?.isAdmin === true,
           onWaitlist: !!user.privateMetadata?.waitlist?.joined,
+          hasTradingAccess: user.privateMetadata?.hasTradingAccess === true,
+          hasRetailApiAccess: user.privateMetadata?.hasRetailApiAccess === true,
         },
         alpaca: email ? alpacaByEmail[email] || null : null,
         stripe: email ? stripeByEmail[email] || null : null,
@@ -2814,6 +4099,225 @@ app.post('/api/admin/settings/database/connection', requireAuth(), requireAdmin(
   }
 });
 
+// ============ Financial API Keys Management (Encrypted Supabase Storage) ============
+
+// List of supported API keys
+const SUPPORTED_API_KEYS = [
+  'ALPHA_VANTAGE_API_KEY',
+  'FINNHUB_API_KEY',
+  'TWELVE_DATA_API_KEY',
+  'POLYGON_API_KEY',
+  'FMP_API_KEY',
+  'TIINGO_API_KEY',
+  'FRED_API_KEY',
+  'EXCHANGERATE_API_KEY',
+  'NEWS_API_KEY',
+  'MARKETSTACK_API_KEY',
+  'NASDAQ_DATA_LINK_API_KEY'
+];
+
+// Ensure api_keys table exists in Supabase
+async function ensureApiKeysTable() {
+  if (!supabaseClient || !supabaseClient.hasStoredConnectionString()) {
+    console.log('API Keys: Supabase not configured, skipping table check');
+    return false;
+  }
+
+  const sql = supabaseClient.getPooledConnection();
+  try {
+    // Check if table exists
+    const result = await sql`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public'
+        AND table_name = 'api_keys'
+      ) as exists
+    `;
+
+    if (!result[0]?.exists) {
+      console.log('API Keys: Creating api_keys table...');
+      await sql`
+        CREATE TABLE api_keys (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          key_name VARCHAR(100) UNIQUE NOT NULL,
+          encrypted_value TEXT NOT NULL,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        )
+      `;
+      console.log('API Keys: Table created successfully');
+    }
+    return true;
+  } catch (error) {
+    console.error('API Keys: Error ensuring table exists:', error.message);
+    return false;
+  }
+}
+
+// Load API keys from Supabase into process.env
+async function loadApiKeysFromSupabase() {
+  if (!supabaseClient || !supabaseClient.hasStoredConnectionString()) {
+    console.log('API Keys: Supabase not configured, skipping key load');
+    return;
+  }
+
+  if (!isEncryptionConfigured()) {
+    console.log('API Keys: ENCRYPTION_KEY not configured, skipping key load');
+    return;
+  }
+
+  const sql = supabaseClient.getPooledConnection();
+  try {
+    const rows = await sql`
+      SELECT key_name, encrypted_value FROM api_keys
+    `;
+
+    let loaded = 0;
+    for (const row of rows) {
+      if (SUPPORTED_API_KEYS.includes(row.key_name)) {
+        try {
+          const decryptedValue = decrypt(row.encrypted_value);
+          process.env[row.key_name] = decryptedValue;
+          loaded++;
+        } catch (err) {
+          console.error(`API Keys: Failed to decrypt ${row.key_name}:`, err.message);
+        }
+      }
+    }
+    if (loaded > 0) {
+      console.log(`API Keys: Loaded ${loaded} keys from Supabase`);
+    }
+  } catch (error) {
+    // Table might not exist yet
+    if (!error.message?.includes('does not exist')) {
+      console.error('API Keys: Error loading keys:', error.message);
+    }
+  }
+}
+
+// Get API key configuration status
+app.get('/api/admin/settings/api-keys/status', requireAuth(), requireAdmin(), async (req, res) => {
+  const keys = {};
+  const encryptionConfigured = isEncryptionConfigured();
+  const supabaseConfigured = supabaseClient?.hasStoredConnectionString() || false;
+
+  for (const key of SUPPORTED_API_KEYS) {
+    keys[key] = !!process.env[key];
+  }
+
+  // Check if api_keys table exists using the same connection as ensureApiKeysTable()
+  let tableExists = false;
+  if (supabaseConfigured) {
+    try {
+      const sql = supabaseClient.getPooledConnection();
+      const result = await sql`
+        SELECT EXISTS (
+          SELECT FROM information_schema.tables
+          WHERE table_schema = 'public'
+          AND table_name = 'api_keys'
+        ) as exists
+      `;
+      tableExists = result[0]?.exists || false;
+    } catch (e) {
+      tableExists = false;
+    }
+  }
+
+  res.json({
+    keys,
+    encryptionConfigured,
+    supabaseConfigured,
+    tableExists
+  });
+});
+
+// Ensure table exists endpoint (called from admin UI)
+app.post('/api/admin/settings/api-keys/init', requireAuth(), requireAdmin(), async (req, res) => {
+  try {
+    const success = await ensureApiKeysTable();
+    if (success) {
+      res.json({ success: true, message: 'API keys table ready' });
+    } else {
+      res.json({ success: false, error: 'Could not initialize table - check Supabase connection' });
+    }
+  } catch (error) {
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// Save API keys (encrypted to Supabase)
+app.post('/api/admin/settings/api-keys', requireAuth(), requireAdmin(), async (req, res) => {
+  const { keys } = req.body;
+
+  if (!keys || typeof keys !== 'object') {
+    return res.status(400).json({ success: false, error: 'Keys object is required' });
+  }
+
+  if (!supabaseClient || !supabaseClient.hasStoredConnectionString()) {
+    return res.status(503).json({ success: false, error: 'Database not configured' });
+  }
+
+  if (!isEncryptionConfigured()) {
+    return res.status(503).json({ success: false, error: 'ENCRYPTION_KEY not configured on server' });
+  }
+
+  const sql = supabaseClient.getPooledConnection();
+
+  try {
+    // Ensure table exists
+    await ensureApiKeysTable();
+
+    let updated = 0;
+    for (const [keyName, value] of Object.entries(keys)) {
+      if (SUPPORTED_API_KEYS.includes(keyName) && value && value.trim()) {
+        const trimmedValue = value.trim();
+        const encryptedValue = encrypt(trimmedValue);
+
+        // Upsert the key
+        await sql`
+          INSERT INTO api_keys (key_name, encrypted_value, updated_at)
+          VALUES (${keyName}, ${encryptedValue}, NOW())
+          ON CONFLICT (key_name)
+          DO UPDATE SET encrypted_value = ${encryptedValue}, updated_at = NOW()
+        `;
+
+        // Update process.env immediately
+        process.env[keyName] = trimmedValue;
+        updated++;
+      }
+    }
+
+    res.json({ success: true, updated });
+  } catch (error) {
+    console.error('Error saving API keys:', error.message);
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// Delete an API key
+app.delete('/api/admin/settings/api-keys/:keyName', requireAuth(), requireAdmin(), async (req, res) => {
+  const { keyName } = req.params;
+
+  if (!SUPPORTED_API_KEYS.includes(keyName)) {
+    return res.status(400).json({ success: false, error: 'Invalid key name' });
+  }
+
+  if (!supabaseClient || !supabaseClient.hasStoredConnectionString()) {
+    return res.status(503).json({ success: false, error: 'Database not configured' });
+  }
+
+  const sql = supabaseClient.getPooledConnection();
+
+  try {
+    await sql`DELETE FROM api_keys WHERE key_name = ${keyName}`;
+    delete process.env[keyName];
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting API key:', error.message);
+    res.json({ success: false, error: error.message });
+  }
+});
+
 // Get cache rules
 app.get('/api/admin/cache-rules', requireAuth(), requireAdmin(), (req, res) => {
   try {
@@ -3252,6 +4756,9 @@ async function startServer() {
   try {
     // Initialize Redis cache
     await redisCache.connect();
+
+    // Load API keys from Supabase (encrypted storage)
+    await loadApiKeysFromSupabase();
 
     // Initialize clients with cache
     if (process.env.FINNHUB_API_KEY) {

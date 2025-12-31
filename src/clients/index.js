@@ -1,4 +1,4 @@
-const AlpacaClient = require('./alpaca');
+const { AlpacaClient, IndividualAlpacaClient } = require('./alpaca');
 const FinnhubClient = require('./finnhub');
 const YahooFinanceClient = require('./yahoo-finance');
 const SumsubClient = require('./sumsub');
@@ -8,6 +8,7 @@ const SupabaseClient = require('./supabase');
 
 module.exports = {
   AlpacaClient,
+  IndividualAlpacaClient,
   FinnhubClient,
   YahooFinanceClient,
   SumsubClient,

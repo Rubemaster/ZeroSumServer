@@ -1,7 +1,7 @@
 {
   "name": "zerosumserver",
   "version": "1.0.0",
-  "description": "",
+  "description": "Express.js server for querying financial data from a DuckDB database with optional Alpaca Markets integration for trading symbols.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -25,5 +25,17 @@
     "postgres": "^3.4.7",
     "redis": "^5.10.0",
     "stripe": "^20.1.0"
-  }
+  },
+  "directories": {
+    "doc": "docs"
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rubemaster/ZeroSumServer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Rubemaster/ZeroSumServer/issues"
+  },
+  "homepage": "https://github.com/Rubemaster/ZeroSumServer#readme"
 }
