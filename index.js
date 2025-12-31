@@ -639,9 +639,14 @@ app.get('/api/alphavantage/quote/:symbol', requireAuth(), async (req, res) => {
     return res.status(503).json({ error: 'Alpha Vantage not configured', details: 'ALPHA_VANTAGE_API_KEY not set' });
   }
   const { symbol } = req.params;
+  const cacheKey = `alphaVantage:quote:${symbol.toUpperCase()}`;
+  const ttl = cacheRulesManager.getTTL('alphaVantage', 'quote');
   try {
-    const response = await axios.get(`https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${apiKey}`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${apiKey}`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'Alpha Vantage request failed', details: error.message });
   }
@@ -655,12 +660,17 @@ app.get('/api/alphavantage/timeseries/:symbol', requireAuth(), async (req, res) 
   }
   const { symbol } = req.params;
   const { interval } = req.query;
+  const func = interval ? 'TIME_SERIES_INTRADAY' : 'TIME_SERIES_DAILY';
+  const cacheKey = `alphaVantage:timeSeries:${symbol.toUpperCase()}:${func}${interval ? ':' + interval : ''}`;
+  const ttl = cacheRulesManager.getTTL('alphaVantage', 'timeSeries');
   try {
-    const func = interval ? 'TIME_SERIES_INTRADAY' : 'TIME_SERIES_DAILY';
-    let url = `https://www.alphavantage.co/query?function=${func}&symbol=${symbol}&apikey=${apiKey}`;
-    if (interval) url += `&interval=${interval}`;
-    const response = await axios.get(url);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      let url = `https://www.alphavantage.co/query?function=${func}&symbol=${symbol}&apikey=${apiKey}`;
+      if (interval) url += `&interval=${interval}`;
+      const response = await axios.get(url);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'Alpha Vantage request failed', details: error.message });
   }
@@ -675,9 +685,14 @@ app.get('/api/twelvedata/quote/:symbol', requireAuth(), async (req, res) => {
     return res.status(503).json({ error: 'Twelve Data not configured', details: 'TWELVE_DATA_API_KEY not set' });
   }
   const { symbol } = req.params;
+  const cacheKey = `twelveData:quote:${symbol.toUpperCase()}`;
+  const ttl = cacheRulesManager.getTTL('twelveData', 'quote');
   try {
-    const response = await axios.get(`https://api.twelvedata.com/quote?symbol=${symbol}&apikey=${apiKey}`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://api.twelvedata.com/quote?symbol=${symbol}&apikey=${apiKey}`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'Twelve Data request failed', details: error.message });
   }
@@ -691,9 +706,16 @@ app.get('/api/twelvedata/timeseries/:symbol', requireAuth(), async (req, res) =>
   }
   const { symbol } = req.params;
   const { interval, outputsize } = req.query;
+  const intervalVal = interval || '1day';
+  const outputsizeVal = outputsize || 30;
+  const cacheKey = `twelveData:series:${symbol.toUpperCase()}:${intervalVal}:${outputsizeVal}`;
+  const ttl = cacheRulesManager.getTTL('twelveData', 'series');
   try {
-    const response = await axios.get(`https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval || '1day'}&outputsize=${outputsize || 30}&apikey=${apiKey}`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${intervalVal}&outputsize=${outputsizeVal}&apikey=${apiKey}`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'Twelve Data request failed', details: error.message });
   }
@@ -740,9 +762,14 @@ app.get('/api/fmp/quote/:symbol', requireAuth(), async (req, res) => {
     return res.status(503).json({ error: 'FMP not configured', details: 'FMP_API_KEY not set' });
   }
   const { symbol } = req.params;
+  const cacheKey = `fmp:quote:${symbol.toUpperCase()}`;
+  const ttl = cacheRulesManager.getTTL('fmp', 'quote');
   try {
-    const response = await axios.get(`https://financialmodelingprep.com/api/v3/quote/${symbol}?apikey=${apiKey}`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://financialmodelingprep.com/api/v3/quote/${symbol}?apikey=${apiKey}`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'FMP request failed', details: error.message });
   }
@@ -755,9 +782,14 @@ app.get('/api/fmp/profile/:symbol', requireAuth(), async (req, res) => {
     return res.status(503).json({ error: 'FMP not configured', details: 'FMP_API_KEY not set' });
   }
   const { symbol } = req.params;
+  const cacheKey = `fmp:profile:${symbol.toUpperCase()}`;
+  const ttl = cacheRulesManager.getTTL('fmp', 'profile');
   try {
-    const response = await axios.get(`https://financialmodelingprep.com/api/v3/profile/${symbol}?apikey=${apiKey}`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://financialmodelingprep.com/api/v3/profile/${symbol}?apikey=${apiKey}`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'FMP request failed', details: error.message });
   }
@@ -772,11 +804,16 @@ app.get('/api/tiingo/quote/:symbol', requireAuth(), async (req, res) => {
     return res.status(503).json({ error: 'Tiingo not configured', details: 'TIINGO_API_KEY not set' });
   }
   const { symbol } = req.params;
+  const cacheKey = `tiingo:quote:${symbol.toUpperCase()}`;
+  const ttl = cacheRulesManager.getTTL('tiingo', 'quote');
   try {
-    const response = await axios.get(`https://api.tiingo.com/iex/${symbol}`, {
-      headers: { 'Authorization': `Token ${apiKey}` }
-    });
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://api.tiingo.com/iex/${symbol}`, {
+        headers: { 'Authorization': `Token ${apiKey}` }
+      });
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'Tiingo request failed', details: error.message });
   }
@@ -789,11 +826,16 @@ app.get('/api/tiingo/meta/:symbol', requireAuth(), async (req, res) => {
     return res.status(503).json({ error: 'Tiingo not configured', details: 'TIINGO_API_KEY not set' });
   }
   const { symbol } = req.params;
+  const cacheKey = `tiingo:meta:${symbol.toUpperCase()}`;
+  const ttl = cacheRulesManager.getTTL('tiingo', 'meta');
   try {
-    const response = await axios.get(`https://api.tiingo.com/tiingo/daily/${symbol}`, {
-      headers: { 'Authorization': `Token ${apiKey}` }
-    });
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://api.tiingo.com/tiingo/daily/${symbol}`, {
+        headers: { 'Authorization': `Token ${apiKey}` }
+      });
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'Tiingo request failed', details: error.message });
   }
@@ -809,9 +851,15 @@ app.get('/api/fred/series/:seriesId', requireAuth(), async (req, res) => {
   }
   const { seriesId } = req.params;
   const { limit } = req.query;
+  const limitVal = limit || 100;
+  const cacheKey = `fred:series:${seriesId.toUpperCase()}:${limitVal}`;
+  const ttl = cacheRulesManager.getTTL('fred', 'series');
   try {
-    const response = await axios.get(`https://api.stlouisfed.org/fred/series/observations?series_id=${seriesId}&api_key=${apiKey}&file_type=json&limit=${limit || 100}&sort_order=desc`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://api.stlouisfed.org/fred/series/observations?series_id=${seriesId}&api_key=${apiKey}&file_type=json&limit=${limitVal}&sort_order=desc`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'FRED request failed', details: error.message });
   }
@@ -827,9 +875,14 @@ app.get('/api/fred/search', requireAuth(), async (req, res) => {
   if (!q) {
     return res.status(400).json({ error: 'Missing required parameter: q' });
   }
+  const cacheKey = `fred:search:${encodeURIComponent(q.toLowerCase())}`;
+  const ttl = cacheRulesManager.getTTL('fred', 'search');
   try {
-    const response = await axios.get(`https://api.stlouisfed.org/fred/series/search?search_text=${encodeURIComponent(q)}&api_key=${apiKey}&file_type=json&limit=10`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://api.stlouisfed.org/fred/series/search?search_text=${encodeURIComponent(q)}&api_key=${apiKey}&file_type=json&limit=10`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'FRED request failed', details: error.message });
   }
@@ -844,9 +897,14 @@ app.get('/api/exchangerate/latest/:base', requireAuth(), async (req, res) => {
     return res.status(503).json({ error: 'ExchangeRate-API not configured', details: 'EXCHANGERATE_API_KEY not set' });
   }
   const { base } = req.params;
+  const cacheKey = `exchangeRate:rates:${base.toUpperCase()}`;
+  const ttl = cacheRulesManager.getTTL('exchangeRate', 'rates');
   try {
-    const response = await axios.get(`https://v6.exchangerate-api.com/v6/${apiKey}/latest/${base}`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://v6.exchangerate-api.com/v6/${apiKey}/latest/${base}`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'ExchangeRate-API request failed', details: error.message });
   }
@@ -859,6 +917,8 @@ app.get('/api/exchangerate/pair/:base/:target', requireAuth(), async (req, res) 
     return res.status(503).json({ error: 'ExchangeRate-API not configured', details: 'EXCHANGERATE_API_KEY not set' });
   }
   const { base, target } = req.params;
+  const cacheKey = `exchangeRate:pair:${base.toUpperCase()}:${target.toUpperCase()}`;
+  const ttl = cacheRulesManager.getTTL('exchangeRate', 'pair');
   try {
     const response = await axios.get(`https://v6.exchangerate-api.com/v6/${apiKey}/pair/${base}/${target}`);
     res.json(response.data);

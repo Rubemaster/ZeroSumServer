@@ -19,5 +19,40 @@
   "sec": {
     "filings": 604800
   },
+  "alphaVantage": {
+    "quote": 604800,
+    "timeSeries": 604800
+  },
+  "twelveData": {
+    "quote": 604800,
+    "series": 604800
+  },
+  "fmp": {
+    "quote": 604800,
+    "profile": 604800
+  },
+  "tiingo": {
+    "quote": 604800,
+    "meta": 604800
+  },
+  "fred": {
+    "series": 604800,
+    "search": 604800
+  },
+  "exchangeRate": {
+    "rates": 604800,
+    "pair": 604800
+  },
+  "newsApi": {
+    "headlines": 604800,
+    "business": 604800
+  },
+  "marketstack": {
+    "eod": 604800,
+    "intraday": 604800
+  },
+  "nasdaqDataLink": {
+    "dataset": 604800
+  },
   "default": 604800
 }

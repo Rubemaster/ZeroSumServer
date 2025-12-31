@@ -169,6 +169,15 @@ class RedisCache {
         polygon: { count: 0, size: 0 },
         yahoo: { count: 0, size: 0 },
         sec: { count: 0, size: 0 },
+        alphaVantage: { count: 0, size: 0 },
+        twelveData: { count: 0, size: 0 },
+        fmp: { count: 0, size: 0 },
+        tiingo: { count: 0, size: 0 },
+        fred: { count: 0, size: 0 },
+        exchangeRate: { count: 0, size: 0 },
+        newsApi: { count: 0, size: 0 },
+        marketstack: { count: 0, size: 0 },
+        nasdaqDataLink: { count: 0, size: 0 },
         other: { count: 0, size: 0 },
       };
 
@@ -198,6 +207,33 @@ class RedisCache {
           } else if (key.startsWith('sec:')) {
             stats.sec.count++;
             stats.sec.size += memoryUsage;
+          } else if (key.startsWith('alphaVantage:')) {
+            stats.alphaVantage.count++;
+            stats.alphaVantage.size += memoryUsage;
+          } else if (key.startsWith('twelveData:')) {
+            stats.twelveData.count++;
+            stats.twelveData.size += memoryUsage;
+          } else if (key.startsWith('fmp:')) {
+            stats.fmp.count++;
+            stats.fmp.size += memoryUsage;
+          } else if (key.startsWith('tiingo:')) {
+            stats.tiingo.count++;
+            stats.tiingo.size += memoryUsage;
+          } else if (key.startsWith('fred:')) {
+            stats.fred.count++;
+            stats.fred.size += memoryUsage;
+          } else if (key.startsWith('exchangeRate:')) {
+            stats.exchangeRate.count++;
+            stats.exchangeRate.size += memoryUsage;
+          } else if (key.startsWith('newsApi:')) {
+            stats.newsApi.count++;
+            stats.newsApi.size += memoryUsage;
+          } else if (key.startsWith('marketstack:')) {
+            stats.marketstack.count++;
+            stats.marketstack.size += memoryUsage;
+          } else if (key.startsWith('nasdaqDataLink:')) {
+            stats.nasdaqDataLink.count++;
+            stats.nasdaqDataLink.size += memoryUsage;
           } else {
             stats.other.count++;
             stats.other.size += memoryUsage;
