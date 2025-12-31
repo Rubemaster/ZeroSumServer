@@ -88,6 +88,7 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5176', // Main app
   'http://localhost:5179', // Admin dashboard (alternate port)
   'http://localhost:52180', // Direct Indexing Demo
+  'https://zerosum-9ad4.onrender.com', // Production frontend
 ];
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -920,8 +921,11 @@ app.get('/api/exchangerate/pair/:base/:target', requireAuth(), async (req, res) 
   const cacheKey = `exchangeRate:pair:${base.toUpperCase()}:${target.toUpperCase()}`;
   const ttl = cacheRulesManager.getTTL('exchangeRate', 'pair');
   try {
-    const response = await axios.get(`https://v6.exchangerate-api.com/v6/${apiKey}/pair/${base}/${target}`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://v6.exchangerate-api.com/v6/${apiKey}/pair/${base}/${target}`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'ExchangeRate-API request failed', details: error.message });
   }
@@ -936,14 +940,22 @@ app.get('/api/newsapi/headlines', requireAuth(), async (req, res) => {
     return res.status(503).json({ error: 'NewsAPI not configured', details: 'NEWS_API_KEY not set' });
   }
   const { category, country, q } = req.query;
+  const categoryVal = category || '';
+  const countryVal = country || 'us';
+  const qVal = q || '';
+  const cacheKey = `newsApi:headlines:${categoryVal}:${countryVal}:${qVal}`;
+  const ttl = cacheRulesManager.getTTL('newsApi', 'headlines');
   try {
-    let url = `https://newsapi.org/v2/top-headlines?apiKey=${apiKey}`;
-    if (category) url += `&category=${category}`;
-    if (country) url += `&country=${country}`;
-    else url += '&country=us';
-    if (q) url += `&q=${encodeURIComponent(q)}`;
-    const response = await axios.get(url);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      let url = `https://newsapi.org/v2/top-headlines?apiKey=${apiKey}`;
+      if (category) url += `&category=${category}`;
+      if (country) url += `&country=${country}`;
+      else url += '&country=us';
+      if (q) url += `&q=${encodeURIComponent(q)}`;
+      const response = await axios.get(url);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'NewsAPI request failed', details: error.message });
   }
@@ -955,9 +967,14 @@ app.get('/api/newsapi/business', requireAuth(), async (req, res) => {
   if (!apiKey) {
     return res.status(503).json({ error: 'NewsAPI not configured', details: 'NEWS_API_KEY not set' });
   }
+  const cacheKey = `newsApi:business`;
+  const ttl = cacheRulesManager.getTTL('newsApi', 'business');
   try {
-    const response = await axios.get(`https://newsapi.org/v2/top-headlines?apiKey=${apiKey}&category=business&country=us`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`https://newsapi.org/v2/top-headlines?apiKey=${apiKey}&category=business&country=us`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'NewsAPI request failed', details: error.message });
   }
@@ -973,9 +990,15 @@ app.get('/api/marketstack/eod/:symbol', requireAuth(), async (req, res) => {
   }
   const { symbol } = req.params;
   const { limit } = req.query;
+  const limitVal = limit || 10;
+  const cacheKey = `marketstack:eod:${symbol.toUpperCase()}:${limitVal}`;
+  const ttl = cacheRulesManager.getTTL('marketstack', 'eod');
   try {
-    const response = await axios.get(`http://api.marketstack.com/v1/eod?access_key=${apiKey}&symbols=${symbol}&limit=${limit || 10}`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`http://api.marketstack.com/v1/eod?access_key=${apiKey}&symbols=${symbol}&limit=${limitVal}`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'Marketstack request failed', details: error.message });
   }
@@ -988,9 +1011,14 @@ app.get('/api/marketstack/intraday/:symbol', requireAuth(), async (req, res) => 
     return res.status(503).json({ error: 'Marketstack not configured', details: 'MARKETSTACK_API_KEY not set' });
   }
   const { symbol } = req.params;
+  const cacheKey = `marketstack:intraday:${symbol.toUpperCase()}`;
+  const ttl = cacheRulesManager.getTTL('marketstack', 'intraday');
   try {
-    const response = await axios.get(`http://api.marketstack.com/v1/intraday?access_key=${apiKey}&symbols=${symbol}&limit=10`);
-    res.json(response.data);
+    const result = await redisCache.getOrFetch(cacheKey, async () => {
+      const response = await axios.get(`http://api.marketstack.com/v1/intraday?access_key=${apiKey}&symbols=${symbol}&limit=10`);
+      return response.data;
+    }, ttl);
+    res.json(result.data);
   } catch (error) {
     res.status(error.response?.status || 500).json({ error: 'Marketstack request failed', details: error.message });
   }
